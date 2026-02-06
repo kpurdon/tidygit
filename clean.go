@@ -123,6 +123,23 @@ func clean(dir string, showBrand bool) repoResult {
 		}
 	}
 
+	// List branches early so we can detect worktree+branch overlap
+	excludeBranch := defaultBranch
+	if excludeBranch == "" {
+		excludeBranch = "__none__"
+	}
+	branches, err := gitListBranches(excludeBranch)
+	if err != nil {
+		result.addErr("listing branches", err)
+	}
+
+	branchSet := make(map[string]struct{}, len(branches))
+	for _, b := range branches {
+		branchSet[b] = struct{}{}
+	}
+
+	deletedBranches := make(map[string]struct{})
+
 	// Prune worktrees
 	if err := gitPruneWorktrees(); err != nil {
 		result.addErr("pruning worktrees", err)
@@ -139,15 +156,26 @@ func clean(dir string, showBrand bool) repoResult {
 			uiSection(fmt.Sprintf("Worktrees (%d)", len(worktrees)))
 
 			for _, wt := range worktrees {
-				uiItem(wt.Path)
+				_, branchExists := branchSet[wt.Branch]
+
+				if branchExists {
+					uiItem(fmt.Sprintf("%s (branch: %s)", wt.Path, wt.Branch))
+				} else {
+					uiItem(wt.Path)
+				}
 
 				if pr, ok := prs[wt.Branch]; ok {
 					uiPR(pr)
 				}
 
+				title := "Remove worktree?"
+				if branchExists {
+					title = "Remove worktree and delete branch?"
+				}
+
 				var confirm bool
 				err := huh.NewConfirm().
-					Title("Remove worktree?").
+					Title(title).
 					Affirmative("Yes").
 					Negative("No").
 					Value(&confirm).
@@ -161,8 +189,18 @@ func clean(dir string, showBrand bool) repoResult {
 					if err := gitRemoveWorktree(wt.Path); err != nil {
 						result.addErr("removing worktree "+wt.Path, err)
 					} else {
-						uiOK("Removed")
+						uiOK("Removed worktree")
 						result.WorktreesRemoved++
+					}
+
+					if branchExists {
+						if err := gitDeleteBranch(wt.Branch); err != nil {
+							result.addErr("deleting branch "+wt.Branch, err)
+						} else {
+							uiOK("Deleted branch " + wt.Branch)
+							deletedBranches[wt.Branch] = struct{}{}
+							result.BranchesDeleted++
+						}
 					}
 				} else {
 					uiSkipped()
@@ -175,55 +213,53 @@ func clean(dir string, showBrand bool) repoResult {
 		}
 	}
 
-	// List branches
-	excludeBranch := defaultBranch
-	if excludeBranch == "" {
-		excludeBranch = "__none__"
-	}
-	branches, err := gitListBranches(excludeBranch)
-	if err != nil {
-		result.addErr("listing branches", err)
-	} else {
-		result.BranchesTotal = len(branches)
-		if len(branches) > 0 {
-			uiStopProgress()
-			uiSection(fmt.Sprintf("Branches (%d)", len(branches)))
-
-			for _, branch := range branches {
-				uiItem(branch)
-
-				if pr, ok := prs[branch]; ok {
-					uiPR(pr)
-				}
-
-				var confirm bool
-				err := huh.NewConfirm().
-					Title("Delete branch?").
-					Affirmative("Yes").
-					Negative("No").
-					Value(&confirm).
-					Run()
-				if err != nil {
-					result.addErr("prompting for branch deletion", err)
-					continue
-				}
-
-				if confirm {
-					if err := gitDeleteBranch(branch); err != nil {
-						result.addErr("deleting branch "+branch, err)
-					} else {
-						uiOK("Deleted")
-						result.BranchesDeleted++
-					}
-				} else {
-					uiSkipped()
-					result.BranchesSkipped++
-				}
-				fmt.Println()
-			}
-		} else {
-			uiDim("No branches to clean up")
+	// Filter out branches already deleted during worktree cleanup
+	var remainingBranches []string
+	for _, b := range branches {
+		if _, deleted := deletedBranches[b]; !deleted {
+			remainingBranches = append(remainingBranches, b)
 		}
+	}
+
+	result.BranchesTotal = len(remainingBranches)
+	if len(remainingBranches) > 0 {
+		uiStopProgress()
+		uiSection(fmt.Sprintf("Branches (%d)", len(remainingBranches)))
+
+		for _, branch := range remainingBranches {
+			uiItem(branch)
+
+			if pr, ok := prs[branch]; ok {
+				uiPR(pr)
+			}
+
+			var confirm bool
+			err := huh.NewConfirm().
+				Title("Delete branch?").
+				Affirmative("Yes").
+				Negative("No").
+				Value(&confirm).
+				Run()
+			if err != nil {
+				result.addErr("prompting for branch deletion", err)
+				continue
+			}
+
+			if confirm {
+				if err := gitDeleteBranch(branch); err != nil {
+					result.addErr("deleting branch "+branch, err)
+				} else {
+					uiOK("Deleted")
+					result.BranchesDeleted++
+				}
+			} else {
+				uiSkipped()
+				result.BranchesSkipped++
+			}
+			fmt.Println()
+		}
+	} else {
+		uiDim("No branches to clean up")
 	}
 
 	uiStopProgress()

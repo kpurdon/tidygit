@@ -258,11 +258,13 @@ func uiSummary(results []repoResult) {
 		)
 	}
 
-	// Error details
+	// Error details — wrap long messages to keep the summary box readable
+	errWrapStyle := dimStyle.Width(44)
 	var errLines []string
 	for _, r := range results {
 		for _, e := range r.Errors {
-			errLines = append(errLines, errStyle.Render("  "+r.Name)+dimStyle.Render(": ")+dimStyle.Render(e))
+			prefix := errStyle.Render("  "+r.Name) + dimStyle.Render(": ")
+			errLines = append(errLines, prefix+errWrapStyle.Render(e))
 		}
 	}
 	if len(errLines) > 0 {
