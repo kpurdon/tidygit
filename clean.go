@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -68,7 +69,9 @@ func clean(dir string, showBrand bool) repoResult {
 			Negative("No").
 			Value(&confirm).
 			Run()
-		if err != nil {
+		if errors.Is(err, huh.ErrUserAborted) {
+			return result
+		} else if err != nil {
 			result.addErr("prompting for reset", err)
 		} else if !confirm {
 			uiSkipped()
@@ -139,6 +142,7 @@ func clean(dir string, showBrand bool) repoResult {
 	}
 
 	deletedBranches := make(map[string]struct{})
+	skippedBranches := make(map[string]struct{})
 
 	// Prune worktrees
 	if err := gitPruneWorktrees(); err != nil {
@@ -180,7 +184,9 @@ func clean(dir string, showBrand bool) repoResult {
 					Negative("No").
 					Value(&confirm).
 					Run()
-				if err != nil {
+				if errors.Is(err, huh.ErrUserAborted) {
+					return result
+				} else if err != nil {
 					result.addErr("prompting for worktree removal", err)
 					continue
 				}
@@ -205,6 +211,9 @@ func clean(dir string, showBrand bool) repoResult {
 				} else {
 					uiSkipped()
 					result.WorktreesSkipped++
+					if branchExists {
+						skippedBranches[wt.Branch] = struct{}{}
+					}
 				}
 				fmt.Println()
 			}
@@ -213,12 +222,16 @@ func clean(dir string, showBrand bool) repoResult {
 		}
 	}
 
-	// Filter out branches already deleted during worktree cleanup
+	// Filter out branches already handled during worktree cleanup
 	var remainingBranches []string
 	for _, b := range branches {
-		if _, deleted := deletedBranches[b]; !deleted {
-			remainingBranches = append(remainingBranches, b)
+		if _, deleted := deletedBranches[b]; deleted {
+			continue
 		}
+		if _, skipped := skippedBranches[b]; skipped {
+			continue
+		}
+		remainingBranches = append(remainingBranches, b)
 	}
 
 	result.BranchesTotal = len(remainingBranches)
@@ -240,7 +253,9 @@ func clean(dir string, showBrand bool) repoResult {
 				Negative("No").
 				Value(&confirm).
 				Run()
-			if err != nil {
+			if errors.Is(err, huh.ErrUserAborted) {
+				return result
+			} else if err != nil {
 				result.addErr("prompting for branch deletion", err)
 				continue
 			}
