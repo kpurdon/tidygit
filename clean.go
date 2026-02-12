@@ -18,7 +18,7 @@ type repoResult struct {
 	BranchesTotal    int
 	BranchesDeleted  int
 	BranchesSkipped  int
-	PRsOpen          int
+	PRsFound         int
 	Errors           []string
 }
 
@@ -112,17 +112,17 @@ func clean(dir string, showBrand bool) repoResult {
 		}
 	}
 
-	// Fetch open PRs
+	// Fetch PRs
 	done = uiSpinner("Checking PRs")
-	prs, err := ghFetchOpenPRs()
+	prs, err := ghFetchPRs()
 	done()
 	if err != nil {
 		result.addErr("fetching PRs", err)
 		prs = map[string]PR{}
 	} else {
-		result.PRsOpen = len(prs)
+		result.PRsFound = len(prs)
 		if len(prs) > 0 {
-			uiOK(fmt.Sprintf("Found %d open PR(s)", len(prs)))
+			uiOK(fmt.Sprintf("Found %d PR(s)", len(prs)))
 		}
 	}
 
@@ -168,7 +168,8 @@ func clean(dir string, showBrand bool) repoResult {
 					uiItem(wt.Path)
 				}
 
-				if pr, ok := prs[wt.Branch]; ok {
+				pr, hasPR := prs[wt.Branch]
+				if hasPR {
 					uiPR(pr)
 				}
 
@@ -177,7 +178,7 @@ func clean(dir string, showBrand bool) repoResult {
 					title = "Remove worktree and delete branch?"
 				}
 
-				var confirm bool
+				confirm := hasPR && pr.State != "OPEN"
 				err := huh.NewConfirm().
 					Title(title).
 					Affirmative("Yes").
@@ -242,11 +243,12 @@ func clean(dir string, showBrand bool) repoResult {
 		for _, branch := range remainingBranches {
 			uiItem(branch)
 
-			if pr, ok := prs[branch]; ok {
+			pr, hasPR := prs[branch]
+			if hasPR {
 				uiPR(pr)
 			}
 
-			var confirm bool
+			confirm := hasPR && pr.State != "OPEN"
 			err := huh.NewConfirm().
 				Title("Delete branch?").
 				Affirmative("Yes").

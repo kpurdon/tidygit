@@ -17,6 +17,7 @@ var (
 	yellowColor = lipgloss.Color("#FFD866")
 	blueColor   = lipgloss.Color("#56B6F7")
 	dimColor    = lipgloss.Color("#6E738D")
+	purpleColor = lipgloss.Color("#A371F7")
 
 	brandStyle   = lipgloss.NewStyle().Foreground(accentColor).Bold(true)
 	brandDim     = lipgloss.NewStyle().Foreground(dimColor)
@@ -132,8 +133,23 @@ func uiDim(text string) {
 }
 
 func uiPR(pr PR) {
-	fmt.Println("    " + prStyle.Render(fmt.Sprintf("PR #%d · %s", pr.Number, pr.Title)))
+	sep := dimStyle.Render(" · ")
+	fmt.Println("    " + prStyle.Render(fmt.Sprintf("PR #%d", pr.Number)) + sep + styledPRState(pr.State) + sep + prStyle.Render(pr.Title))
 	fmt.Println("    " + prURLStyle.Render(pr.URL))
+}
+
+func styledPRState(state string) string {
+	s := strings.ToLower(state)
+	switch s {
+	case "open":
+		return okStyle.Render(s)
+	case "merged":
+		return lipgloss.NewStyle().Foreground(purpleColor).Render(s)
+	case "closed":
+		return errStyle.Render(s)
+	default:
+		return dimStyle.Render(s)
+	}
 }
 
 func uiSkipped() {
@@ -186,7 +202,7 @@ func uiSummary(results []repoResult) {
 		totalBranches += r.BranchesTotal
 		totalBranchesDeleted += r.BranchesDeleted
 		totalBranchesKept += r.BranchesSkipped
-		totalPRs += r.PRsOpen
+		totalPRs += r.PRsFound
 		totalErrors += len(r.Errors)
 		if len(r.Errors) > 0 {
 			reposWithErrors++
@@ -211,7 +227,7 @@ func uiSummary(results []repoResult) {
 			sep,
 			styledRemoved(r.BranchesDeleted, "br deleted")+sep+styledKept(r.BranchesSkipped, "br kept"),
 			sep,
-			styledKept(r.PRsOpen, "open pr"),
+			styledKept(r.PRsFound, "pr(s)"),
 		)
 
 		if len(r.Errors) > 0 {
@@ -249,7 +265,7 @@ func uiSummary(results []repoResult) {
 	)
 	content += fmt.Sprintf("  %s  %s",
 		statsLabel("PRs"),
-		styledKept(totalPRs, "open"),
+		styledKept(totalPRs, "found"),
 	)
 	if totalErrors > 0 {
 		content += fmt.Sprintf("\n  %s  %s",
