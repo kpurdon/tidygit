@@ -11,11 +11,12 @@ type PR struct {
 	Title  string `json:"title"`
 	URL    string `json:"url"`
 	Branch string `json:"headRefName"`
+	State  string `json:"state"`
 }
 
-// ghFetchOpenPRs returns a map of branch name to PR info.
+// ghFetchPRs returns a map of branch name to the most recent PR info.
 // Returns an empty map if gh is not installed or not authenticated.
-func ghFetchOpenPRs() (map[string]PR, error) {
+func ghFetchPRs() (map[string]PR, error) {
 	if _, err := exec.LookPath("gh"); err != nil {
 		return map[string]PR{}, nil
 	}
@@ -26,8 +27,8 @@ func ghFetchOpenPRs() (map[string]PR, error) {
 
 	out, err := exec.Command(
 		"gh", "pr", "list",
-		"--state", "open",
-		"--json", "headRefName,number,title,url",
+		"--state", "all",
+		"--json", "headRefName,number,title,url,state",
 	).CombinedOutput()
 	if err != nil {
 		return map[string]PR{}, nil
@@ -40,7 +41,9 @@ func ghFetchOpenPRs() (map[string]PR, error) {
 
 	result := make(map[string]PR, len(prs))
 	for _, pr := range prs {
-		result[pr.Branch] = pr
+		if _, exists := result[pr.Branch]; !exists {
+			result[pr.Branch] = pr
+		}
 	}
 	return result, nil
 }
