@@ -10,14 +10,15 @@ import (
 )
 
 var (
-	// Vivid palette
-	accentColor = lipgloss.Color("#00D4AA")
-	greenColor  = lipgloss.Color("#00D4AA")
-	redColor    = lipgloss.Color("#FF5277")
-	yellowColor = lipgloss.Color("#FFD866")
-	blueColor   = lipgloss.Color("#56B6F7")
-	dimColor    = lipgloss.Color("#6E738D")
+	// GitHub Primer dark palette
+	accentColor = lipgloss.Color("#58A6FF")
+	greenColor  = lipgloss.Color("#3FB950")
+	redColor    = lipgloss.Color("#F85149")
+	yellowColor = lipgloss.Color("#D29922")
+	blueColor   = lipgloss.Color("#58A6FF")
+	dimColor    = lipgloss.Color("#8B949E")
 	purpleColor = lipgloss.Color("#A371F7")
+	borderColor = lipgloss.Color("#30363D")
 
 	brandStyle   = lipgloss.NewStyle().Foreground(accentColor).Bold(true)
 	brandDim     = lipgloss.NewStyle().Foreground(dimColor)
@@ -32,7 +33,7 @@ var (
 
 	summaryBoxStyle = lipgloss.NewStyle().
 			Border(lipgloss.RoundedBorder()).
-			BorderForeground(accentColor).
+			BorderForeground(borderColor).
 			Padding(1, 2)
 )
 
