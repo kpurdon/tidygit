@@ -6,7 +6,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/charmbracelet/lipgloss"
+	"charm.land/lipgloss/v2"
 )
 
 var (
@@ -37,12 +37,12 @@ var (
 			Padding(1, 2)
 )
 
-// Package-level progress spinner — stopped before any huh prompt.
+// Package-level progress spinner — stopped before any bubbletea prompt.
 var stopProgress func()
 
 func uiBrand() {
 	fmt.Println()
-	fmt.Println(
+	lipgloss.Println(
 		brandStyle.Render("  git tidy") +
 			brandDim.Render(" by kp"),
 	)
@@ -52,8 +52,8 @@ func uiBrand() {
 func uiProgress(current, total int, repoName string) {
 	counter := dimStyle.Render(fmt.Sprintf("  [%d/%d]", current, total))
 	name := sectionStyle.Render(" " + repoName)
-	fmt.Println(counter + name)
-	fmt.Println(dimStyle.Render("  " + strings.Repeat("─", 40)))
+	lipgloss.Println(counter + name)
+	lipgloss.Println(dimStyle.Render("  " + strings.Repeat("─", 40)))
 }
 
 // uiProgressSpinner renders a progress counter with animated spinner on row 3.
@@ -70,8 +70,8 @@ func uiProgressSpinner(current, total int, repoName string) {
 	counter := dimStyle.Render(fmt.Sprintf("  [%d/%d]", current, total))
 	spinner := okStyle.Render(frames[0])
 	name := sectionStyle.Render(" " + repoName)
-	fmt.Println(counter + " " + spinner + name)
-	fmt.Println(dimStyle.Render("  " + strings.Repeat("─", 40)))
+	lipgloss.Println(counter + " " + spinner + name)
+	lipgloss.Println(dimStyle.Render("  " + strings.Repeat("─", 40)))
 
 	go func() {
 		i := 1
@@ -82,7 +82,7 @@ func uiProgressSpinner(current, total int, repoName string) {
 			default:
 				line := counter + " " + okStyle.Render(frames[i%len(frames)]) + name
 				// Save cursor, move to row 3, clear line, write, restore cursor
-				fmt.Printf("\033[s\033[%d;1H\033[K%s\033[u", row, line)
+				lipgloss.Printf("\033[s\033[%d;1H\033[K%s\033[u", row, line)
 				i++
 				time.Sleep(80 * time.Millisecond)
 			}
@@ -94,7 +94,7 @@ func uiProgressSpinner(current, total int, repoName string) {
 			close(done)
 			// Replace spinner with check mark
 			line := counter + " " + okStyle.Render("✓") + name
-			fmt.Printf("\033[s\033[%d;1H\033[K%s\033[u", row, line)
+			lipgloss.Printf("\033[s\033[%d;1H\033[K%s\033[u", row, line)
 		})
 	}
 }
@@ -109,34 +109,34 @@ func uiStopProgress() {
 
 func uiSection(text string) {
 	fmt.Println()
-	fmt.Println(sectionStyle.Render("  " + text))
+	lipgloss.Println(sectionStyle.Render("  " + text))
 	fmt.Println()
 }
 
 func uiOK(text string) {
-	fmt.Println("  " + okStyle.Render("✓") + " " + text)
+	lipgloss.Println("  " + okStyle.Render("✓") + " " + text)
 }
 
 func uiErr(text string) {
-	fmt.Println("  " + errStyle.Render("✗") + " " + text)
+	lipgloss.Println("  " + errStyle.Render("✗") + " " + text)
 }
 
 func uiWarn(text string) {
-	fmt.Println("  " + warnStyle.Render("!") + " " + text)
+	lipgloss.Println("  " + warnStyle.Render("!") + " " + text)
 }
 
 func uiItem(text string) {
-	fmt.Println("  " + itemStyle.Render("▸") + " " + text)
+	lipgloss.Println("  " + itemStyle.Render("▸") + " " + text)
 }
 
 func uiDim(text string) {
-	fmt.Println("  " + dimStyle.Render(text))
+	lipgloss.Println("  " + dimStyle.Render(text))
 }
 
 func uiPR(pr PR) {
 	sep := dimStyle.Render(" · ")
-	fmt.Println("    " + prStyle.Render(fmt.Sprintf("PR #%d", pr.Number)) + sep + styledPRState(pr.State) + sep + prStyle.Render(pr.Title))
-	fmt.Println("    " + prURLStyle.Render(pr.URL))
+	lipgloss.Println("    " + prStyle.Render(fmt.Sprintf("PR #%d", pr.Number)) + sep + styledPRState(pr.State) + sep + prStyle.Render(pr.Title))
+	lipgloss.Println("    " + prURLStyle.Render(pr.URL))
 }
 
 func styledPRState(state string) string {
@@ -154,7 +154,7 @@ func styledPRState(state string) string {
 }
 
 func uiSkipped() {
-	fmt.Println("    " + dimStyle.Render("· Skipped"))
+	lipgloss.Println("    " + dimStyle.Render("· Skipped"))
 }
 
 func uiClearScreen() {
@@ -163,7 +163,7 @@ func uiClearScreen() {
 
 func uiDone() {
 	fmt.Println()
-	fmt.Println("  " + okStyle.Render("✓ Done"))
+	lipgloss.Println("  " + okStyle.Render("✓ Done"))
 	fmt.Println()
 }
 
@@ -173,7 +173,7 @@ func styledKept(n int, label string) string {
 	if n == 0 {
 		return dimStyle.Render(s + " " + label)
 	}
-	return okStyle.Render(s+" "+label)
+	return okStyle.Render(s + " " + label)
 }
 
 // styledRemoved renders a count in red (removed/deleted = destructive).
@@ -182,7 +182,7 @@ func styledRemoved(n int, label string) string {
 	if n == 0 {
 		return dimStyle.Render(s + " " + label)
 	}
-	return errStyle.Render(s+" "+label)
+	return errStyle.Render(s + " " + label)
 }
 
 func uiSummary(results []repoResult) {
@@ -289,7 +289,7 @@ func uiSummary(results []repoResult) {
 		content += "\n" + strings.Join(errLines, "\n")
 	}
 
-	fmt.Println(summaryBoxStyle.Render(content))
+	lipgloss.Println(summaryBoxStyle.Render(content))
 	fmt.Println()
 }
 
@@ -305,7 +305,7 @@ func uiSpinner(text string) func() {
 			case <-done:
 				return
 			default:
-				fmt.Printf("\r  %s %s...",
+				lipgloss.Printf("\r  %s %s...",
 					okStyle.Render(frames[i%len(frames)]),
 					text,
 				)
