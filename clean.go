@@ -5,8 +5,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-
-	"github.com/charmbracelet/huh"
 )
 
 type repoResult struct {
@@ -62,18 +60,12 @@ func clean(dir string, showBrand bool) repoResult {
 		uiWarn("Uncommitted changes detected")
 		uiStopProgress()
 
-		var confirm bool
-		err := huh.NewConfirm().
-			Title("Reset HEAD and discard all changes?").
-			Affirmative("Yes").
-			Negative("No").
-			Value(&confirm).
-			Run()
-		if errors.Is(err, huh.ErrUserAborted) {
+		confirmed, err := confirm("Reset HEAD and discard all changes?", false)
+		if errors.Is(err, ErrUserAborted) {
 			return result
 		} else if err != nil {
 			result.addErr("prompting for reset", err)
-		} else if !confirm {
+		} else if !confirmed {
 			uiSkipped()
 		} else if err := gitResetHard(); err != nil {
 			result.addErr("resetting HEAD", err)
@@ -178,21 +170,16 @@ func clean(dir string, showBrand bool) repoResult {
 					title = "Remove worktree and delete branch?"
 				}
 
-				confirm := hasPR && pr.State != "OPEN"
-				err := huh.NewConfirm().
-					Title(title).
-					Affirmative("Yes").
-					Negative("No").
-					Value(&confirm).
-					Run()
-				if errors.Is(err, huh.ErrUserAborted) {
+				defaultVal := hasPR && pr.State != "OPEN"
+				confirmed, err := confirm(title, defaultVal)
+				if errors.Is(err, ErrUserAborted) {
 					return result
 				} else if err != nil {
 					result.addErr("prompting for worktree removal", err)
 					continue
 				}
 
-				if confirm {
+				if confirmed {
 					if err := gitRemoveWorktree(wt.Path); err != nil {
 						result.addErr("removing worktree "+wt.Path, err)
 					} else {
@@ -248,21 +235,16 @@ func clean(dir string, showBrand bool) repoResult {
 				uiPR(pr)
 			}
 
-			confirm := hasPR && pr.State != "OPEN"
-			err := huh.NewConfirm().
-				Title("Delete branch?").
-				Affirmative("Yes").
-				Negative("No").
-				Value(&confirm).
-				Run()
-			if errors.Is(err, huh.ErrUserAborted) {
+			defaultVal := hasPR && pr.State != "OPEN"
+			confirmed, err := confirm("Delete branch?", defaultVal)
+			if errors.Is(err, ErrUserAborted) {
 				return result
 			} else if err != nil {
 				result.addErr("prompting for branch deletion", err)
 				continue
 			}
 
-			if confirm {
+			if confirmed {
 				if err := gitDeleteBranch(branch); err != nil {
 					result.addErr("deleting branch "+branch, err)
 				} else {

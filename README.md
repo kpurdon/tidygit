@@ -2,7 +2,7 @@
 
 > **Warning**: This project was entirely vibe coded with [Claude Code](https://claude.ai/claude-code). Use at your own risk.
 
-A styled CLI tool for tidying up git repositories. Built with Go and [Charm](https://charm.sh) libraries.
+A styled CLI tool for tidying up git repositories. Built with Go and [Charm](https://charm.sh) v2 libraries.
 
 ## What it does
 
@@ -45,8 +45,8 @@ go build -o tidygit ./
 
 | Library | Purpose |
 |---------|---------|
-| [charmbracelet/lipgloss](https://github.com/charmbracelet/lipgloss) | Styled text output |
-| [charmbracelet/huh](https://github.com/charmbracelet/huh) | Interactive confirm prompts |
+| [lipgloss v2](https://charm.land/lipgloss/v2) | Styled text output |
+| [bubbletea v2](https://charm.land/bubbletea/v2) | Interactive confirm prompts |
 
 Optional: [gh](https://cli.github.com/) for PR information.
 
