@@ -25,9 +25,15 @@ tidygit
 
 # Tidy all repos in a directory
 tidygit all [dir]
+
+# Auto mode: clean up merged branches/worktrees, skip everything else
+tidygit --auto
+tidygit --auto all [dir]
 ```
 
 In `all` mode, each repo is processed with a progress spinner at the top. After all repos are processed, a summary is displayed showing stats for each repo.
+
+In `--auto` mode, merged PR branches and their worktrees are automatically removed without prompting. Everything else (open PRs, branches without PRs, uncommitted changes) is left untouched.
 
 ## Install
 
@@ -55,4 +61,5 @@ Optional: [gh](https://cli.github.com/) for PR information.
 ```zsh
 alias git_clean='tidygit'
 alias git_clean_all='tidygit all'
+alias git_clean_auto='tidygit --auto all'
 ```

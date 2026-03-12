@@ -25,7 +25,13 @@ func (r *repoResult) addErr(msg string, err error) {
 	uiErr(fmt.Sprintf("%s: %v", msg, err))
 }
 
-func clean(dir string, showBrand bool) repoResult {
+// isMerged returns true if the branch has a merged PR.
+func isMerged(prs map[string]PR, branch string) bool {
+	pr, hasPR := prs[branch]
+	return hasPR && pr.State == "MERGED"
+}
+
+func clean(dir string, showBrand bool, auto bool) repoResult {
 	absDir, err := filepath.Abs(dir)
 	if err != nil {
 		return repoResult{Errors: []string{fmt.Sprintf("resolving path: %v", err)}}
@@ -58,19 +64,23 @@ func clean(dir string, showBrand bool) repoResult {
 	// Check for uncommitted changes
 	if gitHasUncommittedChanges() {
 		uiWarn("Uncommitted changes detected")
-		uiStopProgress()
-
-		confirmed, err := confirm("Reset HEAD and discard all changes?", false)
-		if errors.Is(err, ErrUserAborted) {
-			return result
-		} else if err != nil {
-			result.addErr("prompting for reset", err)
-		} else if !confirmed {
+		if auto {
 			uiSkipped()
-		} else if err := gitResetHard(); err != nil {
-			result.addErr("resetting HEAD", err)
 		} else {
-			uiOK("Reset to HEAD")
+			uiStopProgress()
+
+			confirmed, err := confirm("Reset HEAD and discard all changes?", false)
+			if errors.Is(err, ErrUserAborted) {
+				return result
+			} else if err != nil {
+				result.addErr("prompting for reset", err)
+			} else if !confirmed {
+				uiSkipped()
+			} else if err := gitResetHard(); err != nil {
+				result.addErr("resetting HEAD", err)
+			} else {
+				uiOK("Reset to HEAD")
+			}
 		}
 	}
 
@@ -165,18 +175,24 @@ func clean(dir string, showBrand bool) repoResult {
 					uiPR(pr)
 				}
 
-				title := "Remove worktree?"
-				if branchExists {
-					title = "Remove worktree and delete branch?"
-				}
+				var confirmed bool
+				if auto {
+					confirmed = isMerged(prs, wt.Branch)
+				} else {
+					title := "Remove worktree?"
+					if branchExists {
+						title = "Remove worktree and delete branch?"
+					}
 
-				defaultVal := hasPR && pr.State != "OPEN"
-				confirmed, err := confirm(title, defaultVal)
-				if errors.Is(err, ErrUserAborted) {
-					return result
-				} else if err != nil {
-					result.addErr("prompting for worktree removal", err)
-					continue
+					defaultVal := hasPR && pr.State != "OPEN"
+					var err error
+					confirmed, err = confirm(title, defaultVal)
+					if errors.Is(err, ErrUserAborted) {
+						return result
+					} else if err != nil {
+						result.addErr("prompting for worktree removal", err)
+						continue
+					}
 				}
 
 				if confirmed {
@@ -235,13 +251,19 @@ func clean(dir string, showBrand bool) repoResult {
 				uiPR(pr)
 			}
 
-			defaultVal := hasPR && pr.State != "OPEN"
-			confirmed, err := confirm("Delete branch?", defaultVal)
-			if errors.Is(err, ErrUserAborted) {
-				return result
-			} else if err != nil {
-				result.addErr("prompting for branch deletion", err)
-				continue
+			var confirmed bool
+			if auto {
+				confirmed = isMerged(prs, branch)
+			} else {
+				defaultVal := hasPR && pr.State != "OPEN"
+				var err error
+				confirmed, err = confirm("Delete branch?", defaultVal)
+				if errors.Is(err, ErrUserAborted) {
+					return result
+				} else if err != nil {
+					result.addErr("prompting for branch deletion", err)
+					continue
+				}
 			}
 
 			if confirmed {
