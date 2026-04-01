@@ -28,7 +28,7 @@ func ghFetchPRs() (map[string]PR, error) {
 	out, err := exec.Command(
 		"gh", "pr", "list",
 		"--state", "all",
-		"--limit", "1000",
+		"--limit", "100",
 		"--json", "headRefName,number,title,url,state",
 	).CombinedOutput()
 	if err != nil {
