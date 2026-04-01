@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os/exec"
+	"strconv"
 )
 
 type PR struct {
@@ -16,7 +17,7 @@ type PR struct {
 
 // ghFetchPRs returns a map of branch name to the most recent PR info.
 // Returns an empty map if gh is not installed or not authenticated.
-func ghFetchPRs() (map[string]PR, error) {
+func ghFetchPRs(limit int, author string) (map[string]PR, error) {
 	if _, err := exec.LookPath("gh"); err != nil {
 		return map[string]PR{}, nil
 	}
@@ -25,12 +26,17 @@ func ghFetchPRs() (map[string]PR, error) {
 		return map[string]PR{}, nil
 	}
 
-	out, err := exec.Command(
-		"gh", "pr", "list",
+	args := []string{
+		"pr", "list",
 		"--state", "all",
-		"--limit", "1000",
+		"--limit", strconv.Itoa(limit),
 		"--json", "headRefName,number,title,url,state",
-	).CombinedOutput()
+	}
+	if author != "" {
+		args = append(args, "--author", author)
+	}
+
+	out, err := exec.Command("gh", args...).CombinedOutput()
 	if err != nil {
 		return map[string]PR{}, nil
 	}

@@ -31,7 +31,7 @@ func isMerged(prs map[string]PR, branch string) bool {
 	return hasPR && pr.State == "MERGED"
 }
 
-func clean(dir string, showBrand bool, auto bool) repoResult {
+func clean(dir string, showBrand bool, opts options) repoResult {
 	absDir, err := filepath.Abs(dir)
 	if err != nil {
 		return repoResult{Errors: []string{fmt.Sprintf("resolving path: %v", err)}}
@@ -64,7 +64,7 @@ func clean(dir string, showBrand bool, auto bool) repoResult {
 	// Check for uncommitted changes
 	if gitHasUncommittedChanges() {
 		uiWarn("Uncommitted changes detected")
-		if auto {
+		if opts.Auto {
 			uiSkipped()
 		} else {
 			uiStopProgress()
@@ -116,7 +116,7 @@ func clean(dir string, showBrand bool, auto bool) repoResult {
 
 	// Fetch PRs
 	done = uiSpinner("Checking PRs")
-	prs, err := ghFetchPRs()
+	prs, err := ghFetchPRs(opts.PRLimit, opts.PRAuthor)
 	done()
 	if err != nil {
 		result.addErr("fetching PRs", err)
@@ -176,7 +176,7 @@ func clean(dir string, showBrand bool, auto bool) repoResult {
 				}
 
 				var confirmed bool
-				if auto {
+				if opts.Auto {
 					confirmed = isMerged(prs, wt.Branch)
 				} else {
 					title := "Remove worktree?"
@@ -252,7 +252,7 @@ func clean(dir string, showBrand bool, auto bool) repoResult {
 			}
 
 			var confirmed bool
-			if auto {
+			if opts.Auto {
 				confirmed = isMerged(prs, branch)
 			} else {
 				defaultVal := hasPR && pr.State != "OPEN"

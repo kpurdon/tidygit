@@ -4,22 +4,52 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 )
 
+type options struct {
+	Auto    bool
+	PRLimit int
+	PRAuthor string
+}
+
+func defaultOptions() options {
+	return options{
+		PRLimit:  100,
+		PRAuthor: "@me",
+	}
+}
+
 func main() {
-	// Parse --auto flag from any position in args.
-	auto := false
+	opts := defaultOptions()
+
 	var args []string
-	for _, a := range os.Args[1:] {
-		if a == "--auto" {
-			auto = true
-		} else {
+	for i := 0; i < len(os.Args[1:]); i++ {
+		a := os.Args[1+i]
+		switch a {
+		case "--auto":
+			opts.Auto = true
+		case "--exclude-pr-filtering":
+			opts.PRAuthor = ""
+		case "--pr-limit":
+			if i+1 >= len(os.Args[1:]) {
+				fmt.Fprintf(os.Stderr, "--pr-limit requires a value\n")
+				os.Exit(1)
+			}
+			i++
+			v, err := strconv.Atoi(os.Args[1+i])
+			if err != nil || v < 1 {
+				fmt.Fprintf(os.Stderr, "--pr-limit must be a positive integer\n")
+				os.Exit(1)
+			}
+			opts.PRLimit = v
+		default:
 			args = append(args, a)
 		}
 	}
 
 	if len(args) == 0 {
-		result := clean(".", true, auto)
+		result := clean(".", true, opts)
 		if len(result.Errors) > 0 {
 			os.Exit(1)
 		}
@@ -32,17 +62,17 @@ func main() {
 		if len(args) > 1 {
 			dir = args[1]
 		}
-		if err := cleanAll(dir, auto); err != nil {
+		if err := cleanAll(dir, opts); err != nil {
 			uiErr(err.Error())
 			os.Exit(1)
 		}
 	default:
-		fmt.Fprintf(os.Stderr, "Usage: tidygit [--auto] [all [dir]]\n")
+		fmt.Fprintf(os.Stderr, "Usage: tidygit [--auto] [--pr-limit N] [--exclude-pr-filtering] [all [dir]]\n")
 		os.Exit(1)
 	}
 }
 
-func cleanAll(dir string, auto bool) error {
+func cleanAll(dir string, opts options) error {
 	absDir, err := filepath.Abs(dir)
 	if err != nil {
 		return fmt.Errorf("resolving path %s: %w", dir, err)
@@ -82,7 +112,7 @@ func cleanAll(dir string, auto bool) error {
 		uiBrand()
 		uiProgressSpinner(i+1, len(repoPaths), repoNames[i])
 
-		results = append(results, clean(repoPath, false, auto))
+		results = append(results, clean(repoPath, false, opts))
 
 		// Always stop the progress spinner before next iteration,
 		// even if clean() returned early without stopping it.
