@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -56,7 +57,7 @@ func TestFetchPRIdentityAndActiveHistory(t *testing.T) {
 				}
 				return tc.batch, nil
 			}
-			got, err := fetchPRs(t.Context(), command, "github.com/upstream/repo", []Branch{branch}, options{PRLimit: 10, PRAuthor: "@me"})
+			got, err := fetchSourcePRs(t.Context(), command, "github.com/upstream/repo", []Branch{branch}, options{PRLimit: 10, PRAuthor: "@me"})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -75,7 +76,7 @@ func TestFetchPRFailures(t *testing.T) {
 	failure := errors.New("authentication failed")
 	for _, targeted := range []bool{false, true} {
 		calls := 0
-		_, err := fetchPRs(t.Context(), func(context.Context, string, ...string) (string, error) {
+		_, err := fetchSourcePRs(t.Context(), func(context.Context, string, ...string) (string, error) {
 			calls++
 			if targeted && calls == 1 {
 				return "[]", nil
@@ -87,7 +88,7 @@ func TestFetchPRFailures(t *testing.T) {
 		}
 	}
 	calls := 0
-	_, err := fetchPRs(t.Context(), func(context.Context, string, ...string) (string, error) {
+	_, err := fetchSourcePRs(t.Context(), func(context.Context, string, ...string) (string, error) {
 		calls++
 		if calls == 1 {
 			return "[]", nil
@@ -100,7 +101,7 @@ func TestFetchPRFailures(t *testing.T) {
 }
 
 func TestFetchPREmptyBranches(t *testing.T) {
-	got, err := fetchPRs(t.Context(), func(context.Context, string, ...string) (string, error) {
+	got, err := fetchSourcePRs(t.Context(), func(context.Context, string, ...string) (string, error) {
 		t.Fatal("queried empty branch set")
 		return "", nil
 	}, "github.com/me/repo", nil, options{})
@@ -123,7 +124,7 @@ func TestFetchPRBoundedConcurrentLookups(t *testing.T) {
 	release := make(chan struct{})
 	done := make(chan error, 1)
 	go func() {
-		_, err := fetchPRs(t.Context(), func(ctx context.Context, _ string, args ...string) (string, error) {
+		_, err := fetchSourcePRs(t.Context(), func(ctx context.Context, _ string, args ...string) (string, error) {
 			head := ""
 			for i, arg := range args {
 				if arg == "--head" {
@@ -176,5 +177,53 @@ func TestFetchPRUnknownSources(t *testing.T) {
 	got, err := ghFetchPRs(t.Context(), repository{Dir: t.TempDir()}, branches, options{})
 	if err != nil || len(got) != 0 {
 		t.Fatalf("unknown branch identity triggered external lookup: %v, %v", got, err)
+	}
+}
+
+func TestLocalPRPrecedesTrackedParent(t *testing.T) {
+	for _, state := range []string{"OPEN", "CLOSED", "MERGED"} {
+		t.Run(state, func(t *testing.T) {
+			b := Branch{Name: "child", OID: "local-tip", LocalRepo: "github.com/me/repo", SourceRepo: "github.com/me/repo", SourceBranch: "parent"}
+			command := func(_ context.Context, _ string, args ...string) (string, error) {
+				if strings.Contains(strings.Join(args, " "), "--head parent") {
+					t.Fatal("queried parent after finding named PR")
+				}
+				return `[{"number":1,"headRefName":"child","headRefOid":"different-tip","state":"` + state + `","headRepository":{"name":"repo"},"headRepositoryOwner":{"login":"me"}}]`, nil
+			}
+			got, err := fetchPRs(t.Context(), command, "github.com/me/repo", []Branch{b}, options{PRLimit: 10})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got[b.Name].Branch != "child" || got[b.Name].VerifiedAlias {
+				t.Fatalf("incorrect resolution: %+v", got)
+			}
+		})
+	}
+}
+
+func TestNamedPRUsesLocalForkIdentity(t *testing.T) {
+	b := Branch{Name: "child", OID: "tip", LocalRepo: "github.com/me/repo", SourceRepo: "github.com/upstream/repo", SourceBranch: "main"}
+	got, err := fetchPRs(t.Context(), func(context.Context, string, ...string) (string, error) {
+		return `[{"number":3,"headRefName":"child","headRefOid":"tip","state":"CLOSED","headRepository":{"name":"repo"},"headRepositoryOwner":{"login":"other"}},{"number":2,"headRefName":"child","headRefOid":"tip","state":"OPEN","headRepository":{"name":"repo"},"headRepositoryOwner":{"login":"me"}}]`, nil
+	}, "github.com/upstream/repo", []Branch{b}, options{PRLimit: 10})
+	if err != nil || got[b.Name].Number != 2 {
+		t.Fatalf("got %+v, %v", got, err)
+	}
+}
+
+func TestMismatchedTerminalUpstreamDoesNotHideAssociatedOpenPR(t *testing.T) {
+	f := newCleanupFixture(t)
+	f.write(f.prs, `[{"number":1,"headRefName":"sibling","headRefOid":"old-tip","state":"MERGED","headRepository":{"name":"repo"},"headRepositoryOwner":{"login":"audit"}},{"number":2,"headRefName":"real-source","headRefOid":"local-tip","state":"OPEN","headRepository":{"name":"repo"},"headRepositoryOwner":{"login":"audit"}}]`)
+	associations := filepath.Join(f.root, "associations.json")
+	f.write(associations, `{"data":{"repository":{"object":{"associatedPullRequests":{"nodes":[{"number":2,"headRefName":"real-source","headRefOid":"local-tip","state":"OPEN","headRepository":{"name":"repo","owner":{"login":"audit"}}}],"pageInfo":{"hasNextPage":false}}}}}}`)
+	t.Setenv("TEST_ASSOCIATIONS", associations)
+	f.write(filepath.Join(f.root, "bin", "gh"), "#!/bin/sh\nif [ \"$1\" = api ]; then cat \"$TEST_ASSOCIATIONS\"; else cat \"$TEST_PRS\"; fi\n")
+	branch := Branch{Name: "renamed", OID: "local-tip", LocalRepo: "github.com/audit/repo", SourceRepo: "github.com/audit/repo", SourceBranch: "sibling"}
+	got, err := ghFetchPRs(t.Context(), f.repo, []Branch{branch}, options{PRLimit: 10, Jobs: 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got[branch.Name].Number != 2 || got[branch.Name].State != "OPEN" {
+		t.Fatalf("associated open PR hidden: %+v", got)
 	}
 }

@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -29,11 +30,20 @@ func TestParseArgs(t *testing.T) {
 	for _, args := range [][]string{
 		{"--auto", "all", "repos", "--dryrun"},
 		{"all", "repos", "extra"},
-		{"--pr-limit"}, {"--pr-limit", "0"}, {"--jobs=-1"}, {"--timeout=0s"}, {"--auto=false"},
+		{"--pr-limit"}, {"--pr-limit", "0"}, {"--jobs=-1"}, {"--timeout=0s"}, {"--auto=false"}, {"--stale-days=-1"}, {"--stale-days=30d"},
 	} {
 		if _, _, _, err := parseArgs(args); err == nil {
 			t.Errorf("accepted invalid arguments %v", args)
 		}
+	}
+	for _, days := range []string{"0", "7", "30"} {
+		opts, _, _, err := parseArgs([]string{"--stale-days", days})
+		if err != nil || fmt.Sprint(opts.StaleDays) != days {
+			t.Fatalf("stale threshold %q: %+v, %v", days, opts, err)
+		}
+	}
+	if defaultOptions().StaleDays != 30 {
+		t.Fatal("stale cleanup must default to 30 days")
 	}
 }
 

@@ -18,7 +18,7 @@ type repository struct {
 	Timeout                       time.Duration
 }
 
-type Branch struct{ Name, OID, SourceRepo, SourceBranch string }
+type Branch struct{ Name, OID, SourceRepo, SourceBranch, LocalRepo string }
 type Worktree struct {
 	Path, Branch, OID string
 	Locked, Prunable  bool
@@ -41,7 +41,7 @@ func (r repository) command(ctx context.Context, name string, args ...string) (s
 		return "", fmt.Errorf("%s %s: %w", name, strings.Join(args, " "), ctx.Err())
 	}
 	if err != nil {
-		return "", fmt.Errorf("%s %s: %w: %s", name, strings.Join(args, " "), err, strings.TrimSpace(stderr.String()))
+		return string(out), fmt.Errorf("%s %s: %w: %s", name, strings.Join(args, " "), err, strings.TrimSpace(stderr.String()))
 	}
 	return string(out), nil
 }
@@ -128,6 +128,9 @@ func (r repository) branches(ctx context.Context) ([]Branch, error) {
 		return nil, err
 	}
 	remotes := map[string]string{}
+	if raw, err := r.git(ctx, "remote", "get-url", "origin"); err == nil {
+		remotes["origin"], _ = githubRepo(raw)
+	}
 	var result []Branch
 	for line := range strings.SplitSeq(strings.TrimSuffix(out, "\n"), "\n") {
 		if line == "" {
@@ -137,7 +140,7 @@ func (r repository) branches(ctx context.Context) ([]Branch, error) {
 		if len(fields) != 4 {
 			return nil, errors.New("invalid branch inventory")
 		}
-		b := Branch{Name: fields[0], OID: fields[1], SourceBranch: fields[0]}
+		b := Branch{Name: fields[0], OID: fields[1], SourceBranch: fields[0], LocalRepo: remotes["origin"]}
 		remote := fields[2]
 		if remote == "" {
 			remote = "origin"
@@ -169,6 +172,13 @@ func (r repository) status(ctx context.Context, path string, ignored bool) (stri
 	return r.git(ctx, args...)
 }
 func (r repository) checkBranch(ctx context.Context, b Branch) error {
+	kept, err := r.keptBranches(ctx)
+	if err != nil {
+		return err
+	}
+	if kept[b.Name] {
+		return fmt.Errorf("branch %s is explicitly retained by tidygit.keep", b.Name)
+	}
 	out, err := r.git(ctx, "rev-parse", "--verify", "refs/heads/"+b.Name)
 	if err != nil {
 		return err
@@ -179,6 +189,9 @@ func (r repository) checkBranch(ctx context.Context, b Branch) error {
 	return nil
 }
 func (r repository) deleteBranch(ctx context.Context, b Branch) (bool, error) {
+	if err := r.checkBranch(ctx, b); err != nil {
+		return false, err
+	}
 	worktrees, err := r.worktrees(ctx)
 	if err != nil {
 		return false, err

@@ -68,7 +68,7 @@ func uiKeep(reason string) { uiAction("KEPT", reason) }
 func uiAction(action, detail string) {
 	style := okStyle
 	switch action {
-	case "KEPT":
+	case "KEPT", "STALE":
 		style = warnStyle
 	case "ARCHIVED", "UNCHANGED", "WOULD ARCHIVE", "WOULD REMOVE", "WOULD DELETE":
 		style = sectionStyle

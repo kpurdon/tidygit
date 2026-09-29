@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 func stateDirectory() (string, error) {
@@ -27,8 +28,12 @@ func stateDirectory() (string, error) {
 // ordinary edits, including ignored files, without reading build-cache contents.
 // A content edit preserving both size and modification time requires --force.
 func localFingerprint(ctx context.Context, r repository, opts options) (string, error) {
+	return localFingerprintAt(ctx, r, opts, time.Now())
+}
+
+func localFingerprintAt(ctx context.Context, r repository, opts options, now time.Time) (string, error) {
 	h := sha256.New()
-	fingerprintField(h, fmt.Sprintf("v1:%s:%s:%s:%t:%t:%d:%s", version, canonicalPath(r.CommonDir), canonicalPath(r.ProtectedPath), opts.Auto, opts.Rebase, opts.PRLimit, opts.PRAuthor))
+	fingerprintField(h, fmt.Sprintf("v2:%s:%s:%s:%t:%t:%d:%s:%d", version, canonicalPath(r.CommonDir), canonicalPath(r.ProtectedPath), opts.Auto, opts.Rebase, opts.PRLimit, opts.PRAuthor, opts.StaleDays))
 	for _, args := range [][]string{{"for-each-ref", "--format=%(refname)%00%(objectname)%00%(symref)"}, {"config", "--null", "--list", "--show-origin"}} {
 		out, err := r.git(ctx, args...)
 		if err != nil {
@@ -79,6 +84,11 @@ func localFingerprint(ctx context.Context, r repository, opts options) (string, 
 		return "", err
 	}
 	for _, wt := range worktrees {
+		stale, err := staleWorktree(ctx, r, wt, opts.StaleDays, now)
+		if err != nil {
+			return "", err
+		}
+		fingerprintField(h, fmt.Sprint(stale))
 		if err := ctx.Err(); err != nil {
 			return "", err
 		}
@@ -110,6 +120,27 @@ func localFingerprint(ctx context.Context, r repository, opts options) (string, 
 		}
 		if err := fingerprintTree(ctx, h, wt.Path, false); err != nil {
 			return "", err
+		}
+	}
+	if opts.StaleDays > 0 {
+		checkedOut := make(map[string]bool, len(worktrees))
+		for _, wt := range worktrees {
+			checkedOut[wt.Branch] = true
+		}
+		branches, err := r.branches(ctx)
+		if err != nil {
+			return "", err
+		}
+		for _, branch := range branches {
+			if checkedOut[branch.Name] {
+				continue
+			}
+			stale, err := staleBranch(ctx, r, branch, opts.StaleDays, now)
+			if err != nil {
+				return "", err
+			}
+			fingerprintField(h, branch.Name)
+			fingerprintField(h, fmt.Sprint(stale))
 		}
 	}
 	return fmt.Sprintf("%x", h.Sum(nil)), nil

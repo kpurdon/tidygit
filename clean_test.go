@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -9,6 +10,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 )
 
 type cleanupFixture struct {
@@ -52,7 +54,7 @@ func newCleanupFixture(t *testing.T) *cleanupFixture {
 	}
 	// Preserve the configured identity while routing network operations to the bare repository.
 	f.write(filepath.Join(bin, "git"), "#!/bin/sh\nif [ \"$1\" = remote ] && [ \"$2\" = get-url ]; then exec \"$TEST_REAL_GIT\" config --get \"remote.$3.url\"; fi\nexec \"$TEST_REAL_GIT\" \"$@\"\n")
-	f.write(filepath.Join(bin, "gh"), "#!/bin/sh\ncat \"$TEST_PRS\"\n")
+	f.write(filepath.Join(bin, "gh"), "#!/bin/sh\nif [ \"$1\" = api ]; then printf '%s\\n' '{\"data\":{\"repository\":{\"object\":null,\"pullRequest\":null}}}'; else cat \"$TEST_PRS\"; fi\n")
 	for _, name := range []string{"git", "gh"} {
 		if err := os.Chmod(filepath.Join(bin, name), 0755); err != nil {
 			t.Fatal(err)
@@ -557,5 +559,96 @@ func TestArchiveNestedIgnoredDirectoriesAndPreservePrimaryEnv(t *testing.T) {
 	f.assertBranch("merged", false)
 	if _, err := os.Stat(path); !os.IsNotExist(err) {
 		t.Fatalf("worktree remains: %v", err)
+	}
+}
+
+func TestAutoArchivesStaleDirtyWorkAndRetainsActiveProtectedWork(t *testing.T) {
+	f := newCleanupFixture(t)
+	t.Setenv("XDG_STATE_HOME", filepath.Join(f.root, "state"))
+	old := time.Now().Add(-45 * 24 * time.Hour).Truncate(time.Second)
+	t.Setenv("GIT_COMMITTER_DATE", old.Format(time.RFC3339))
+	t.Setenv("GIT_AUTHOR_DATE", old.Format(time.RFC3339))
+	oids := map[string]string{}
+	for _, name := range []string{"stale-dirty", "recent", "open", "keep"} {
+		path := filepath.Join(f.root, name)
+		f.branch(name, path)
+		f.run(path, "commit", "--allow-empty", "-m", "old local history")
+		oids[name] = f.run(path, "rev-parse", "HEAD")
+		f.write(filepath.Join(path, "tracked"), "staged data\n")
+		f.run(path, "add", "tracked")
+		f.write(filepath.Join(path, "tracked"), "unstaged data\n")
+		f.write(filepath.Join(path, "untracked"), "untracked data\n")
+		f.write(filepath.Join(path, "ignored"), "ignored data\n")
+		if name != "recent" {
+			linked := f.repo
+			linked.Dir = path
+			admin, err := linked.gitDir(t.Context())
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, root := range []string{path, admin} {
+				if err := filepath.WalkDir(root, func(path string, _ fs.DirEntry, err error) error {
+					if err != nil {
+						return err
+					}
+					return os.Chtimes(path, old, old)
+				}); err != nil {
+					t.Fatal(err)
+				}
+			}
+		}
+	}
+	f.run(f.dir, "config", "--add", "tidygit.keep", "keep")
+	f.pullRequests("OPEN", map[string]string{"open": oids["open"]})
+	result := cleanFixture(t, f, false)
+	if result.WorktreesRemoved != 1 || result.BranchesDeleted != 1 || len(result.Archives) != 1 {
+		t.Fatalf("cleanup counts: %+v", result)
+	}
+	f.assertBranch("stale-dirty", false)
+	if _, err := os.Stat(filepath.Join(f.root, "stale-dirty")); !os.IsNotExist(err) {
+		t.Fatalf("stale worktree retained: %v", err)
+	}
+	archive := result.Archives[0]
+	for _, name := range []string{"tracked", "untracked", "ignored"} {
+		if _, err := os.Stat(filepath.Join(archive, "files", "stale-dirty", name)); err != nil {
+			t.Fatalf("archived %s missing: %v", name, err)
+		}
+	}
+	for _, name := range []string{"recent", "open", "keep"} {
+		f.assertBranch(name, true)
+		if got, err := os.ReadFile(filepath.Join(f.root, name, "tracked")); err != nil || string(got) != "unstaged data\n" {
+			t.Fatalf("protected %s changed: %q %v", name, got, err)
+		}
+	}
+}
+
+func TestAutoArchivesStaleStandaloneBranchBeforeDeletingIt(t *testing.T) {
+	f := newCleanupFixture(t)
+	t.Setenv("XDG_STATE_HOME", filepath.Join(f.root, "state"))
+	old := time.Now().Add(-45 * 24 * time.Hour).Truncate(time.Second)
+	t.Setenv("GIT_COMMITTER_DATE", old.Format(time.RFC3339))
+	t.Setenv("GIT_AUTHOR_DATE", old.Format(time.RFC3339))
+	f.run(f.dir, "switch", "-c", "old")
+	f.write(filepath.Join(f.dir, "unique"), "unpublished work\n")
+	f.run(f.dir, "add", "unique")
+	f.run(f.dir, "commit", "-m", "old unpublished work")
+	oid := f.run(f.dir, "rev-parse", "HEAD")
+	f.run(f.dir, "switch", "main")
+	for _, name := range []string{"refs/heads/old", "logs/refs/heads/old"} {
+		if err := os.Chtimes(filepath.Join(f.repo.CommonDir, filepath.FromSlash(name)), old, old); err != nil {
+			t.Fatal(err)
+		}
+	}
+	result := cleanFixture(t, f, false)
+	if result.BranchesDeleted != 1 || len(result.Archives) != 1 {
+		t.Fatalf("cleanup counts: %+v", result)
+	}
+	f.assertBranch("old", false)
+	recovered := filepath.Join(f.root, "recovered")
+	f.run(f.root, "init", recovered)
+	f.run(recovered, "fetch", filepath.Join(result.Archives[0], "history.bundle"), "refs/heads/old")
+	f.run(recovered, "checkout", "--detach", oid)
+	if got, err := os.ReadFile(filepath.Join(recovered, "unique")); err != nil || string(got) != "unpublished work\n" {
+		t.Fatalf("deleted branch unrecoverable: %q %v", got, err)
 	}
 }

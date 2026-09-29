@@ -22,19 +22,21 @@ type options struct {
 	PRAuthor                                   string
 	Timeout                                    time.Duration
 	Jobs                                       int
+	StaleDays                                  int
 }
 
 func defaultOptions() options {
-	return options{PRLimit: 100, PRAuthor: "@me", Timeout: 30 * time.Second, Jobs: 4}
+	return options{PRLimit: 100, PRAuthor: "@me", Timeout: 30 * time.Second, Jobs: 4, StaleDays: 30}
 }
 
 const usage = `Usage: tidygit [options] [all [dir]]
 
 Tidy the current repository or immediate repositories in a directory.
 
-  --auto                  Clean up verified merged or closed PR work; never prompt
+  --auto                  Clean up completed or archived stale work; never prompt
   --dry-run               Show proposed cleanup without changing repositories
   --force                 Recheck unchanged repositories; keep all deletion safeguards
+  --stale-days N          Archive inactive work after N days (default 30; 0 disables)
   --pr-limit N            PR lookup limit (default 100)
   --exclude-pr-filtering  Include all authors in the initial PR lookup
   --rebase                Rebase the default branch instead of fast-forward only
@@ -60,7 +62,7 @@ func parseArgs(args []string) (options, string, bool, error) {
 		}
 		name, value, hasValue := strings.Cut(arg, "=")
 		switch name {
-		case "--pr-limit", "--timeout", "--jobs":
+		case "--pr-limit", "--timeout", "--jobs", "--stale-days":
 			if !hasValue {
 				i++
 				if i == len(args) {
@@ -76,6 +78,13 @@ func parseArgs(args []string) (options, string, bool, error) {
 				opts.Timeout = d
 			} else {
 				n, err := strconv.Atoi(value)
+				if name == "--stale-days" {
+					if err != nil || n < 0 {
+						return opts, "", false, errors.New("--stale-days must be a nonnegative integer")
+					}
+					opts.StaleDays = n
+					continue
+				}
 				if err != nil || n < 1 {
 					return opts, "", false, fmt.Errorf("%s must be a positive integer", name)
 				}
