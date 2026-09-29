@@ -63,10 +63,10 @@ func uiProgress(current, total int, name string) {
 func uiSection(s string) { uiPrint("\n" + sectionStyle.Render("  "+displayText(s)) + "\n") }
 func uiOK(s string)      { uiPrint("  " + okStyle.Render("✓") + " " + displayText(s)) }
 func uiWarn(s string)    { uiPrint("  " + warnStyle.Render("!") + " " + displayText(s)) }
-func uiItem(s string)    { uiPrint("  ▸ " + displayText(s)) }
+func uiItem(s string)    { uiPrint("\n  ▸ " + displayText(s)) }
 func uiDim(s string)     { uiPrint("    " + dimStyle.Render(displayText(s))) }
 func uiKeep(reason string) {
-	uiPrint("    " + warnStyle.Bold(true).Render("↳ KEPT") + " · " + displayText(reason) + "\n")
+	uiPrint("    " + warnStyle.Bold(true).Render("↳ KEPT") + " · " + displayText(reason))
 }
 func uiErr(s string) {
 	prefix := "  ✗ "
@@ -80,7 +80,7 @@ func uiErr(s string) {
 	}
 }
 func shortOID(oid string) string { return oid[:min(len(oid), 12)] }
-func uiBranch(b Branch)          { uiItem(b.Name + " · " + shortOID(b.OID)) }
+func uiBranch(b Branch)          { uiItem("Branch: " + b.Name + " · " + shortOID(b.OID)) }
 func uiWorktree(base string, wt Worktree) {
 	path := wt.Path
 	if relative, err := filepath.Rel(base, path); err == nil {
@@ -90,7 +90,7 @@ func uiWorktree(base string, wt Worktree) {
 	if branch == "" {
 		branch = "detached HEAD"
 	}
-	uiItem(path + " · " + branch + " · " + shortOID(wt.OID))
+	uiItem("Worktree: " + path + " · " + branch + " · " + shortOID(wt.OID))
 }
 func uiPR(pr PR) {
 	state := strings.ToLower(pr.State)
