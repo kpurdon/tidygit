@@ -17,6 +17,7 @@ func TestSummaryReportsActualPlannedAndPartialProgress(t *testing.T) {
 		want   []string
 		absent string
 	}{
+		{"unchanged", repoResult{Name: "repo", Unchanged: true}, []string{"unchanged"}, "0 removed"},
 		{"actual", repoResult{Name: "repo", WorktreesRemoved: 1, BranchesDeleted: 2, Duration: time.Second}, []string{"done", "1 removed", "2 deleted", "1s"}, "planned"},
 		{"preview", repoResult{Name: "repo", DryRun: true, WorktreesPlanned: 1, BranchesPlanned: 2}, []string{"dry run", "1 planned", "2 planned"}, "deleted"},
 		{"canceled", repoResult{Name: "repo", Canceled: true, BranchesDeleted: 1}, []string{"canceled", "1 deleted", "partial progress"}, "done"},

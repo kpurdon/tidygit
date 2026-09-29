@@ -27,6 +27,7 @@ func newCleanupFixture(t *testing.T) *cleanupFixture {
 		t.Fatal(err)
 	}
 	f := &cleanupFixture{t: t, root: t.TempDir(), git: git}
+	t.Setenv("XDG_STATE_HOME", filepath.Join(f.root, "state"))
 	f.dir = filepath.Join(f.root, "repo")
 	f.bare = filepath.Join(f.root, "origin.git")
 	f.prs = filepath.Join(f.root, "prs.json")
@@ -151,18 +152,26 @@ func TestAutoPreservesDirtyAndNewerWork(t *testing.T) {
 			f.pullRequests(state, prs)
 			r := cleanFixture(t, f, false)
 			checkCounts(t, r, 6)
-			if r.BranchesDeleted != 1 || r.WorktreesRemoved != 1 {
+			if r.BranchesDeleted != 2 || r.WorktreesRemoved != 2 {
 				t.Fatalf("unexpected deletions: %+v", r)
 			}
 			for name := range prs {
-				f.assertBranch(name, name != "clean")
-				if name != "clean" {
+				f.assertBranch(name, name != "clean" && name != "ignored")
+				if name != "clean" && name != "ignored" {
 					if _, err := os.Stat(filepath.Join(f.root, name)); err != nil {
 						t.Fatal(err)
 					}
 				}
 			}
-			for _, kind := range []string{"tracked", "untracked", "ignored"} {
+
+			if len(r.Archives) != 1 {
+				t.Fatalf("missing ignored-file archive: %+v", r)
+			}
+			archived, err := os.ReadFile(filepath.Join(r.Archives[0], "files", "ignored"))
+			if err != nil || string(archived) != "keep me\n" {
+				t.Fatalf("ignored data lost: %q %v", archived, err)
+			}
+			for _, kind := range []string{"tracked", "untracked"} {
 				body, err := os.ReadFile(filepath.Join(f.root, kind, kind))
 				if err != nil || string(body) != "keep me\n" {
 					t.Fatalf("lost %s data: %q %v", kind, body, err)
@@ -199,6 +208,7 @@ func TestDryRunDoesNotMutateRepository(t *testing.T) {
 	path := filepath.Join(f.root, "merged")
 	oid := f.branch("merged", path)
 	f.pullRequests("MERGED", map[string]string{"merged": oid})
+	f.write(filepath.Join(path, "ignored"), "do not move\n")
 	f.write(filepath.Join(f.dir, "tracked"), "staged\n")
 	f.run(f.dir, "add", "tracked")
 	snapshot := func() map[string]string {
@@ -230,6 +240,13 @@ func TestDryRunDoesNotMutateRepository(t *testing.T) {
 	checkCounts(t, r, 1)
 	if r.BranchesPlanned != 1 || r.WorktreesPlanned != 1 {
 		t.Fatalf("missing plan: %+v", r)
+	}
+
+	if _, err := os.Stat(filepath.Join(f.root, "state")); !os.IsNotExist(err) {
+		t.Fatalf("dry run created state: %v", err)
+	}
+	if data, err := os.ReadFile(filepath.Join(path, "ignored")); err != nil || string(data) != "do not move\n" {
+		t.Fatalf("dry run changed ignored files: %q %v", data, err)
 	}
 	f.assertBranch("merged", true)
 	if _, err := os.Stat(path); err != nil {
@@ -392,5 +409,111 @@ func TestClosedPRCleanup(t *testing.T) {
 				t.Fatalf("worktree still exists: %v", err)
 			}
 		})
+	}
+}
+
+func TestArchiveFailureKeepsWorktree(t *testing.T) {
+	f := newCleanupFixture(t)
+	path := filepath.Join(f.root, "closed")
+	oid := f.branch("closed", path)
+	f.pullRequests("CLOSED", map[string]string{"closed": oid})
+	f.write(filepath.Join(path, "ignored"), "precious\n")
+	if err := os.MkdirAll(filepath.Join(f.root, "state", "tidygit"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	f.write(filepath.Join(f.root, "state", "tidygit", "archives"), "blocks archive directory")
+	opts := defaultOptions()
+	opts.Auto = true
+	r, err := clean(t.Context(), f.repo, opts)
+	if err != nil || len(r.Errors) == 0 || r.WorktreesRemoved != 0 || r.BranchesDeleted != 0 {
+		t.Fatalf("archive failure not retained: %+v, %v", r, err)
+	}
+	f.assertBranch("closed", true)
+	if data, err := os.ReadFile(filepath.Join(path, "ignored")); err != nil || string(data) != "precious\n" {
+		t.Fatalf("original data lost: %q %v", data, err)
+	}
+}
+
+func TestLocalMarkerSkipsNetworkUntilForceOrLocalChange(t *testing.T) {
+	f := newCleanupFixture(t)
+	f.run(f.dir, "remote", "set-head", "origin", "main")
+	log := filepath.Join(f.root, "fetches")
+	t.Setenv("TEST_FETCH_LOG", log)
+	f.write(filepath.Join(f.root, "bin", "git"), "#!/bin/sh\nif [ \"$1\" = remote ] && [ \"$2\" = get-url ]; then exec \"$TEST_REAL_GIT\" config --get \"remote.$3.url\"; fi\nif [ \"$1\" = fetch ]; then echo fetch >> \"$TEST_FETCH_LOG\"; fi\nexec \"$TEST_REAL_GIT\" \"$@\"\n")
+	first := cleanFixture(t, f, false)
+	if first.Unchanged {
+		t.Fatal("first run skipped")
+	}
+	second := cleanFixture(t, f, false)
+	if !second.Unchanged {
+		t.Fatal("unchanged repository was processed again")
+	}
+	data, err := os.ReadFile(log)
+	if err != nil || strings.Count(string(data), "fetch") != 1 {
+		t.Fatalf("unchanged run fetched: %q %v", data, err)
+	}
+	opts := defaultOptions()
+	opts.Auto = true
+	opts.Force = true
+	forced, err := clean(t.Context(), f.repo, opts)
+	if err != nil || len(forced.Errors) != 0 || forced.Unchanged {
+		t.Fatalf("force did not process: %+v %v", forced, err)
+	}
+	f.branch("new-worktree", filepath.Join(f.root, "new-worktree"))
+	changed := cleanFixture(t, f, false)
+	if changed.Unchanged {
+		t.Fatal("new worktree did not invalidate marker")
+	}
+	data, err = os.ReadFile(log)
+	if err != nil || strings.Count(string(data), "fetch") != 3 {
+		t.Fatalf("expected initial, forced and changed fetches: %q %v", data, err)
+	}
+	f.write(f.prs, "invalid JSON")
+	failed, err := clean(t.Context(), f.repo, opts)
+	if err != nil || len(failed.Errors) == 0 {
+		t.Fatalf("expected forced failure: %+v %v", failed, err)
+	}
+	f.write(f.prs, "[]")
+	retried := cleanFixture(t, f, false)
+	if retried.Unchanged {
+		t.Fatal("failed forced run left a matching marker")
+	}
+
+}
+
+func TestUnwritableMarkerStopsForcedCleanup(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root bypasses directory permissions")
+	}
+	f := newCleanupFixture(t)
+	path := filepath.Join(f.root, "closed")
+	oid := f.branch("closed", path)
+	f.pullRequests("CLOSED", map[string]string{"closed": oid})
+	opts := defaultOptions()
+	opts.Auto = true
+	opts.Force = true
+	fingerprint, err := localFingerprint(t.Context(), f.repo, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := writeRunMarker(f.repo, fingerprint); err != nil {
+		t.Fatal(err)
+	}
+	marker, err := runMarkerPath(f.repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	parent := filepath.Dir(marker)
+	if err := os.Chmod(parent, 0500); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Chmod(parent, 0700)
+	r, err := clean(t.Context(), f.repo, opts)
+	if err != nil || len(r.Errors) == 0 || r.WorktreesRemoved != 0 || r.BranchesDeleted != 0 {
+		t.Fatalf("cleanup ran without invalidating marker: %+v %v", r, err)
+	}
+	f.assertBranch("closed", true)
+	if _, err := os.Stat(path); err != nil {
+		t.Fatal(err)
 	}
 }

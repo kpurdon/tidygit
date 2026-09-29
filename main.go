@@ -17,11 +17,11 @@ import (
 var version = "dev"
 
 type options struct {
-	Auto, DryRun, Rebase, Help, Version bool
-	PRLimit                             int
-	PRAuthor                            string
-	Timeout                             time.Duration
-	Jobs                                int
+	Auto, DryRun, Rebase, Force, Help, Version bool
+	PRLimit                                    int
+	PRAuthor                                   string
+	Timeout                                    time.Duration
+	Jobs                                       int
 }
 
 func defaultOptions() options {
@@ -34,6 +34,7 @@ Tidy the current repository or immediate repositories in a directory.
 
   --auto                  Clean up verified merged or closed PR work; never prompt
   --dry-run               Show proposed cleanup without changing repositories
+  --force                 Recheck unchanged repositories; keep all deletion safeguards
   --pr-limit N            PR lookup limit (default 100)
   --exclude-pr-filtering  Include all authors in the initial PR lookup
   --rebase                Rebase the default branch instead of fast-forward only
@@ -84,7 +85,7 @@ func parseArgs(args []string) (options, string, bool, error) {
 					opts.PRLimit = n
 				}
 			}
-		case "--auto", "--dry-run", "--rebase", "--exclude-pr-filtering", "--version", "--help", "-h":
+		case "--auto", "--dry-run", "--rebase", "--force", "--exclude-pr-filtering", "--version", "--help", "-h":
 			if hasValue {
 				return opts, "", false, fmt.Errorf("%s does not accept a value", name)
 			}
@@ -93,6 +94,8 @@ func parseArgs(args []string) (options, string, bool, error) {
 				opts.Auto = true
 			case "--dry-run":
 				opts.DryRun = true
+			case "--force":
+				opts.Force = true
 			case "--rebase":
 				opts.Rebase = true
 			case "--exclude-pr-filtering":

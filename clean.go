@@ -17,6 +17,8 @@ type repoResult struct {
 	DryRun                                                               bool
 	Duration                                                             time.Duration
 	Canceled                                                             bool
+	Unchanged                                                            bool
+	Archives                                                             []string
 	Errors                                                               []string
 }
 
@@ -33,6 +35,45 @@ func clean(ctx context.Context, r repository, opts options) (result repoResult, 
 		result.Canceled = errors.Is(returnedErr, context.Canceled) || errors.Is(returnedErr, ErrUserAborted)
 	}()
 	result = repoResult{Name: filepath.Base(r.Dir), DryRun: opts.DryRun}
+	var fingerprint string
+	var scanErr error
+	if !opts.DryRun {
+		fingerprint, scanErr = localFingerprint(ctx, r, opts)
+	}
+	if err := ctx.Err(); err != nil {
+		return result, err
+	}
+	if scanErr != nil {
+		uiWarn("Unable to check local marker; running cleanup: " + scanErr.Error())
+	} else if !opts.Force && !opts.DryRun {
+		unchanged, err := readRunMarker(r, fingerprint)
+		if err != nil {
+			uiWarn("Unable to read local marker; running cleanup: " + err.Error())
+		}
+		if unchanged {
+			result.Unchanged = true
+			uiDim("UNCHANGED · skipping cleanup (use --force to recheck GitHub)")
+			return result, nil
+		}
+	}
+	if !opts.DryRun {
+		if err := invalidateRunMarker(r); err != nil {
+			result.addErr("clearing local marker before cleanup", err)
+			return result, nil
+		}
+	}
+	result, returnedErr = cleanRepository(ctx, r, opts)
+	if returnedErr == nil && len(result.Errors) == 0 && !opts.DryRun && scanErr == nil && ctx.Err() == nil {
+		if err := writeRunMarker(r, fingerprint); err != nil {
+			uiWarn("Unable to save local marker: " + err.Error())
+		}
+	}
+	return result, returnedErr
+}
+
+func cleanRepository(ctx context.Context, r repository, opts options) (result repoResult, returnedErr error) {
+	result = repoResult{Name: filepath.Base(r.Dir), DryRun: opts.DryRun}
+
 	fail := func(msg string, err error) (repoResult, error) { result.addErr(msg, err); return result, ctx.Err() }
 	if err := ctx.Err(); err != nil {
 		return result, err
@@ -201,13 +242,25 @@ func clean(ctx context.Context, r repository, opts options) (result repoResult, 
 				reason = cleanupKeepReason(prs[wt.Branch], b)
 			}
 		}
+		var ignored []string
 		if reason == "" {
-			status, err := r.status(ctx, wt.Path, true)
+			status, err := r.status(ctx, wt.Path, false)
 			if err != nil {
 				result.addErr("checking worktree", err)
 				reason = "unable to verify files"
 			} else if status != "" {
-				reason = "modified, untracked, or ignored files"
+				reason = "modified or untracked files"
+			}
+		}
+
+		if reason == "" {
+			var err error
+			ignored, err = ignoredPaths(ctx, r, wt.Path)
+			if err != nil {
+				result.addErr("checking ignored files", err)
+				reason = "unable to verify ignored files"
+			} else if len(ignored) > 0 && (!hasBranch || cleanupKeepReason(prs[wt.Branch], b) != "") {
+				reason = "ignored files require a verified merged or closed PR before archiving"
 			}
 		}
 		if reason == "" {
@@ -230,6 +283,9 @@ func clean(ctx context.Context, r repository, opts options) (result repoResult, 
 			uiLocalCommits(ctx, r, defaultBranch, b)
 		}
 		if opts.DryRun {
+			if len(ignored) > 0 {
+				uiDim("Would archive ignored files outside the worktree before removal")
+			}
 			uiOK("Would remove worktree " + wt.Path)
 			result.WorktreesPlanned++
 			if hasBranch {
@@ -243,6 +299,9 @@ func clean(ctx context.Context, r repository, opts options) (result repoResult, 
 		if hasBranch {
 			title = "Remove this clean worktree and delete its branch?"
 		}
+		if len(ignored) > 0 {
+			title = "Archive ignored files, remove this worktree, and delete its branch?"
+		}
 		yes, err := approve(ctx, title, opts.Auto)
 		if err != nil {
 			return result, err
@@ -252,6 +311,22 @@ func clean(ctx context.Context, r repository, opts options) (result repoResult, 
 			result.WorktreesSkipped++
 			keepBranch(wt.Branch)
 			continue
+		}
+
+		if len(ignored) > 0 {
+			archivePath, err := r.archiveWorktree(ctx, wt, b)
+			if archivePath != "" {
+				result.Archives = append(result.Archives, archivePath)
+			}
+			if err != nil {
+				result.addErr("archiving ignored files", err)
+				result.WorktreesSkipped++
+				keepBranch(wt.Branch)
+				continue
+			}
+			if archivePath != "" {
+				uiOK("Archived ignored files to " + archivePath)
+			}
 		}
 		if err := r.removeWorktree(ctx, wt, b, hasBranch); err != nil {
 			result.addErr("removing worktree", err)
@@ -360,7 +435,7 @@ func uiLocalCommits(ctx context.Context, r repository, base string, b Branch) {
 		}
 	}
 }
-func (r repository) removeWorktree(ctx context.Context, wt Worktree, b Branch, hasBranch bool) error {
+func (r repository) checkWorktree(ctx context.Context, wt Worktree, b Branch, hasBranch bool) error {
 	fresh, err := r.worktrees(ctx)
 	if err != nil {
 		return err
@@ -389,6 +464,36 @@ func (r repository) removeWorktree(ctx context.Context, wt Worktree, b Branch, h
 		if err := r.checkBranch(ctx, b); err != nil {
 			return err
 		}
+	}
+
+	status, err := r.status(ctx, wt.Path, false)
+	if err != nil {
+		return err
+	}
+	if status != "" {
+		return errors.New("worktree contains modified or untracked files; keeping it")
+	}
+	return nil
+}
+
+func (r repository) archiveWorktree(ctx context.Context, wt Worktree, b Branch) (string, error) {
+	if err := r.checkWorktree(ctx, wt, b, true); err != nil {
+		return "", err
+	}
+	paths, err := ignoredPaths(ctx, r, wt.Path)
+	if err != nil || len(paths) == 0 {
+		return "", err
+	}
+	state, err := stateDirectory()
+	if err != nil {
+		return "", err
+	}
+	return archiveIgnored(ctx, wt.Path, filepath.Join(state, "archives"), paths)
+}
+
+func (r repository) removeWorktree(ctx context.Context, wt Worktree, b Branch, hasBranch bool) error {
+	if err := r.checkWorktree(ctx, wt, b, hasBranch); err != nil {
+		return err
 	}
 	status, err := r.status(ctx, wt.Path, true)
 	if err != nil {

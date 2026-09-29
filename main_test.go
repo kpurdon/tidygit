@@ -22,8 +22,8 @@ func TestParseArgs(t *testing.T) {
 			t.Fatalf("%v: %+v %q %v %v", args, opts, dir, all, err)
 		}
 	}
-	opts, dir, all, err := parseArgs([]string{"--timeout=2s", "--jobs", "2", "--pr-limit=5", "--exclude-pr-filtering", "all", "--", "-repos"})
-	if err != nil || dir != "-repos" || !all || opts.Timeout != 2*time.Second || opts.Jobs != 2 || opts.PRLimit != 5 || opts.PRAuthor != "" {
+	opts, dir, all, err := parseArgs([]string{"--force", "--timeout=2s", "--jobs", "2", "--pr-limit=5", "--exclude-pr-filtering", "all", "--", "-repos"})
+	if err != nil || !opts.Force || dir != "-repos" || !all || opts.Timeout != 2*time.Second || opts.Jobs != 2 || opts.PRLimit != 5 || opts.PRAuthor != "" {
 		t.Fatalf("flags: %+v %q %v %v", opts, dir, all, err)
 	}
 	for _, args := range [][]string{

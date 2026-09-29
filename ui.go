@@ -115,6 +115,9 @@ func summaryCounts(r repoResult) string {
 	return fmt.Sprintf("worktrees %d removed / %d kept · branches %d deleted / %d kept", r.WorktreesRemoved, r.WorktreesSkipped, r.BranchesDeleted, r.BranchesSkipped)
 }
 func summaryStatus(r repoResult) string {
+	if r.Unchanged {
+		return "unchanged"
+	}
 	status := "done"
 	if r.DryRun {
 		status = "dry run"
@@ -139,11 +142,16 @@ func uiSummary(results []repoResult) {
 			style = errStyle
 		case "canceled":
 			style = warnStyle
-		case "dry run":
+		case "dry run", "unchanged":
 			style = dimStyle
 		}
 		uiPrint(fmt.Sprintf("  %s · %s · %s", sectionStyle.Render(displayText(r.Name)), style.Render(status), r.Duration.Round(time.Millisecond)))
-		uiDim(summaryCounts(r))
+		if !r.Unchanged {
+			uiDim(summaryCounts(r))
+		}
+		for _, path := range r.Archives {
+			uiDim("Archive: " + path)
+		}
 		if len(r.Errors) > 0 && !r.Canceled {
 			failed++
 		}
