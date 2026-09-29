@@ -1,290 +1,409 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 type repoResult struct {
-	Name             string
-	DefaultBranch    string
-	WorktreesTotal   int
-	WorktreesRemoved int
-	WorktreesSkipped int
-	BranchesTotal    int
-	BranchesDeleted  int
-	BranchesSkipped  int
-	PRsFound         int
-	Errors           []string
+	Name, DefaultBranch                                                  string
+	WorktreesTotal, WorktreesRemoved, WorktreesSkipped, WorktreesPlanned int
+	BranchesTotal, BranchesDeleted, BranchesSkipped, BranchesPlanned     int
+	PRsFound                                                             int
+	DryRun                                                               bool
+	Errors                                                               []string
 }
 
 func (r *repoResult) addErr(msg string, err error) {
-	r.Errors = append(r.Errors, fmt.Sprintf("%s: %v", msg, err))
-	uiErr(fmt.Sprintf("%s: %v", msg, err))
+	text := fmt.Sprintf("%s: %v", msg, err)
+	r.Errors = append(r.Errors, text)
+	uiErr(text)
 }
 
-// isMerged returns true if the branch has a merged PR.
-func isMerged(prs map[string]PR, branch string) bool {
-	pr, hasPR := prs[branch]
-	return hasPR && pr.State == "MERGED"
+func mergedBranch(pr PR, b Branch) bool {
+	return pr.State == "MERGED" && pr.HeadOID != "" && pr.HeadOID == b.OID && b.SourceRepo != "" && pr.HeadRepo == b.SourceRepo && pr.Branch == b.SourceBranch
 }
 
-func clean(dir string, showBrand bool, opts options) repoResult {
-	absDir, err := filepath.Abs(dir)
+func clean(ctx context.Context, r repository, opts options) (repoResult, error) {
+	result := repoResult{Name: filepath.Base(r.Dir), DryRun: opts.DryRun}
+	fail := func(msg string, err error) (repoResult, error) { result.addErr(msg, err); return result, ctx.Err() }
+	if err := ctx.Err(); err != nil {
+		return result, err
+	}
+	if state, err := r.inProgress(ctx); err != nil {
+		return fail("checking repository state", err)
+	} else if state != "" {
+		return fail("checking repository state", fmt.Errorf("%s in progress; finish or abort it before cleanup", state))
+	}
+	defaultBranch, err := r.defaultBranch(ctx)
 	if err != nil {
-		return repoResult{Errors: []string{fmt.Sprintf("resolving path: %v", err)}}
+		return fail("detecting default branch", err)
 	}
-
-	if err := os.Chdir(absDir); err != nil {
-		return repoResult{Errors: []string{fmt.Sprintf("changing to directory %s: %v", absDir, err)}}
+	result.DefaultBranch = defaultBranch
+	uiSection(fmt.Sprintf("%s (%s)", result.Name, defaultBranch))
+	if opts.DryRun {
+		uiWarn("Dry run: repositories will not be changed")
 	}
-
-	repoName := filepath.Base(absDir)
-	result := repoResult{Name: repoName}
-
-	// Detect default branch
-	defaultBranch, err := gitDefaultBranch()
-	if err != nil {
-		result.addErr("detecting default branch", err)
-	} else {
-		result.DefaultBranch = defaultBranch
-	}
-
-	if showBrand {
-		uiBrand()
-	}
-	if defaultBranch != "" {
-		uiSection(fmt.Sprintf("%s (%s)", repoName, defaultBranch))
-	} else {
-		uiSection(repoName)
-	}
-
-	// Check for uncommitted changes
-	if gitHasUncommittedChanges() {
-		uiWarn("Uncommitted changes detected")
-		if opts.Auto {
-			uiSkipped()
-		} else {
-			uiStopProgress()
-
-			confirmed, err := confirm("Reset HEAD and discard all changes?", false)
-			if errors.Is(err, ErrUserAborted) {
-				return result
-			} else if err != nil {
-				result.addErr("prompting for reset", err)
-			} else if !confirmed {
-				uiSkipped()
-			} else if err := gitResetHard(); err != nil {
-				result.addErr("resetting HEAD", err)
-			} else {
-				uiOK("Reset to HEAD")
-			}
+	if !opts.DryRun {
+		done := uiSpinner("Fetching")
+		_, err = r.git(ctx, "fetch", "--all", "--prune")
+		done()
+		if err != nil {
+			return fail("fetching", err)
 		}
-	}
-
-	// Switch to default branch
-	onDefaultBranch := false
-	if defaultBranch != "" {
-		if err := gitSwitch(defaultBranch); err != nil {
-			result.addErr("switching to "+defaultBranch, err)
-		} else {
-			uiOK("Switched to " + defaultBranch)
-			onDefaultBranch = true
-		}
-	}
-
-	// Fetch all
-	done := uiSpinner("Fetching")
-	err = gitFetchAll()
-	done()
-	if err != nil {
-		result.addErr("fetching", err)
-	} else {
 		uiOK("Fetched (pruned remotes)")
-	}
-
-	// Pull with rebase (only if on default branch)
-	if onDefaultBranch {
-		if err := gitPull(defaultBranch); err != nil {
-			result.addErr("pulling "+defaultBranch, err)
+		status, err := r.status(ctx, r.Dir, false)
+		if err != nil {
+			return fail("checking changes", err)
+		}
+		if status != "" {
+			uiWarn("Current worktree has changes; keeping its branch and files untouched")
 		} else {
-			uiOK("Pulled " + defaultBranch + " (rebase)")
+			worktrees, err := r.worktrees(ctx)
+			if err != nil {
+				return fail("checking worktrees", err)
+			}
+			occupied := false
+			for _, wt := range worktrees {
+				if wt.Branch == defaultBranch && canonicalPath(wt.Path) != r.Dir {
+					occupied = true
+				}
+			}
+			if occupied {
+				uiWarn("Default branch is in another worktree; leaving the current checkout untouched")
+			} else {
+				if _, err = r.git(ctx, "switch", "--no-overwrite-ignore", defaultBranch); err != nil {
+					return fail("switching to default branch", err)
+				}
+				uiOK("Switched to " + defaultBranch)
+				args := []string{"merge", "--ff-only", "--no-overwrite-ignore", "refs/remotes/origin/" + defaultBranch}
+				update := true
+				if opts.Rebase {
+					status, err := r.status(ctx, r.Dir, true)
+					if err != nil {
+						return fail("checking ignored files before rebase", err)
+					}
+					if status != "" {
+						uiWarn("Local files are present; skipping rebase to preserve them")
+						update = false
+					}
+					args = []string{"rebase", "refs/remotes/origin/" + defaultBranch}
+				}
+				if update {
+					if _, err = r.git(ctx, args...); err != nil {
+						return fail("updating default branch", err)
+					}
+					uiOK("Updated " + defaultBranch)
+				}
+			}
+		}
+		if _, err = r.git(ctx, "worktree", "prune"); err != nil {
+			return fail("pruning worktrees", err)
 		}
 	}
-
-	// Fetch PRs
-	done = uiSpinner("Checking PRs")
-	prs, err := ghFetchPRs(opts.PRLimit, opts.PRAuthor)
+	branches, err := r.branches(ctx)
+	if err != nil {
+		return fail("listing branches", err)
+	}
+	worktrees, err := r.worktrees(ctx)
+	if err != nil {
+		return fail("listing worktrees", err)
+	}
+	activeOperation, err := r.worktreeOperation(ctx, worktrees)
+	if err != nil {
+		return fail("checking linked worktree operations", err)
+	}
+	branchByName := map[string]Branch{}
+	var candidates []Branch
+	for _, b := range branches {
+		if b.Name != defaultBranch {
+			branchByName[b.Name] = b
+			candidates = append(candidates, b)
+		}
+	}
+	result.BranchesTotal = len(candidates)
+	if len(worktrees) > 0 {
+		result.WorktreesTotal = len(worktrees) - 1
+	}
+	protectedBranches := map[string]bool{}
+	for i, wt := range worktrees {
+		if i == 0 || r.protects(wt.Path) || wt.Locked || wt.Prunable || wt.Branch == defaultBranch {
+			protectedBranches[wt.Branch] = true
+		}
+	}
+	var lookupCandidates []Branch
+	for _, b := range candidates {
+		if !protectedBranches[b.Name] {
+			lookupCandidates = append(lookupCandidates, b)
+		}
+	}
+	done := uiSpinner("Checking PRs")
+	prs, err := ghFetchPRs(ctx, r, lookupCandidates, opts)
 	done()
 	if err != nil {
-		result.addErr("fetching PRs", err)
+		if ctx.Err() != nil {
+			return result, ctx.Err()
+		}
+		if opts.Auto || !errors.Is(err, errGHUnavailable) {
+			return fail("fetching PRs", err)
+		}
+		uiWarn("GitHub CLI is unavailable; merged status cannot be verified")
 		prs = map[string]PR{}
-	} else {
-		result.PRsFound = len(prs)
-		if len(prs) > 0 {
-			uiOK(fmt.Sprintf("Found %d PR(s)", len(prs)))
+	}
+	result.PRsFound = len(prs)
+	handled := map[string]bool{}
+	keepBranch := func(name string) {
+		if _, ok := branchByName[name]; ok && !handled[name] {
+			handled[name] = true
+			result.BranchesSkipped++
 		}
 	}
-
-	// List branches early so we can detect worktree+branch overlap
-	excludeBranch := defaultBranch
-	if excludeBranch == "" {
-		excludeBranch = "__none__"
-	}
-	branches, err := gitListBranches(excludeBranch)
-	if err != nil {
-		result.addErr("listing branches", err)
-	}
-
-	branchSet := make(map[string]struct{}, len(branches))
-	for _, b := range branches {
-		branchSet[b] = struct{}{}
-	}
-
-	deletedBranches := make(map[string]struct{})
-	skippedBranches := make(map[string]struct{})
-
-	// Prune worktrees
-	if err := gitPruneWorktrees(); err != nil {
-		result.addErr("pruning worktrees", err)
-	}
-
-	// List worktrees
-	worktrees, err := gitListWorktrees()
-	if err != nil {
-		result.addErr("listing worktrees", err)
-	} else {
-		result.WorktreesTotal = len(worktrees)
-		if len(worktrees) > 0 {
-			uiStopProgress()
-			uiSection(fmt.Sprintf("Worktrees (%d)", len(worktrees)))
-
-			for _, wt := range worktrees {
-				_, branchExists := branchSet[wt.Branch]
-
-				if branchExists {
-					uiItem(fmt.Sprintf("%s (branch: %s)", wt.Path, wt.Branch))
-				} else {
-					uiItem(wt.Path)
-				}
-
-				pr, hasPR := prs[wt.Branch]
-				if hasPR {
-					uiPR(pr)
-				}
-
-				var confirmed bool
-				if opts.Auto {
-					confirmed = isMerged(prs, wt.Branch)
-				} else {
-					title := "Remove worktree?"
-					if branchExists {
-						title = "Remove worktree and delete branch?"
-					}
-
-					defaultVal := hasPR && pr.State != "OPEN"
-					var err error
-					confirmed, err = confirm(title, defaultVal)
-					if errors.Is(err, ErrUserAborted) {
-						return result
-					} else if err != nil {
-						result.addErr("prompting for worktree removal", err)
-						continue
-					}
-				}
-
-				if confirmed {
-					if err := gitRemoveWorktree(wt.Path); err != nil {
-						result.addErr("removing worktree "+wt.Path, err)
-					} else {
-						uiOK("Removed worktree")
-						result.WorktreesRemoved++
-					}
-
-					if branchExists {
-						if err := gitDeleteBranch(wt.Branch); err != nil {
-							result.addErr("deleting branch "+wt.Branch, err)
-						} else {
-							uiOK("Deleted branch " + wt.Branch)
-							deletedBranches[wt.Branch] = struct{}{}
-							result.BranchesDeleted++
-						}
-					}
-				} else {
-					uiSkipped()
-					result.WorktreesSkipped++
-					if branchExists {
-						skippedBranches[wt.Branch] = struct{}{}
-					}
-				}
-				fmt.Println()
-			}
-		} else {
-			uiDim("No worktrees to clean up")
-		}
-	}
-
-	// Filter out branches already handled during worktree cleanup
-	var remainingBranches []string
-	for _, b := range branches {
-		if _, deleted := deletedBranches[b]; deleted {
+	for index, wt := range worktrees {
+		if index == 0 {
+			keepBranch(wt.Branch)
 			continue
 		}
-		if _, skipped := skippedBranches[b]; skipped {
+		if err := ctx.Err(); err != nil {
+			return result, err
+		}
+		uiItem(fmt.Sprintf("%s (branch: %s, HEAD: %s)", wt.Path, wt.Branch, wt.OID))
+		if pr, ok := prs[wt.Branch]; ok {
+			uiPR(pr)
+		}
+		reason := ""
+		switch {
+		case r.protects(wt.Path):
+			reason = "current worktree"
+		case wt.Branch == defaultBranch:
+			reason = "default branch"
+		case wt.Locked:
+			reason = "locked worktree"
+		case wt.Prunable:
+			reason = "unavailable worktree"
+		}
+		if reason == "" {
+			status, err := r.status(ctx, wt.Path, true)
+			if err != nil {
+				result.addErr("checking worktree", err)
+				reason = "unable to verify files"
+			} else if status != "" {
+				reason = "modified, untracked, or ignored files"
+			}
+		}
+		if reason == "" {
+			linked := r
+			linked.Dir = wt.Path
+			if state, err := linked.inProgress(ctx); err != nil {
+				result.addErr("checking worktree state", err)
+				reason = "unable to verify repository state"
+			} else if state != "" {
+				reason = state + " in progress"
+			}
+		}
+		b, hasBranch := branchByName[wt.Branch]
+		if reason == "" && hasBranch && activeOperation != "" {
+			reason = activeOperation
+		}
+		if reason == "" && (opts.Auto || opts.DryRun) && (!hasBranch || !mergedBranch(prs[wt.Branch], b)) {
+			reason = "no merged PR matching this repository and commit"
+		}
+		if reason != "" {
+			uiKeep(reason)
+			result.WorktreesSkipped++
+			keepBranch(wt.Branch)
 			continue
 		}
-		remainingBranches = append(remainingBranches, b)
-	}
-
-	result.BranchesTotal = len(remainingBranches)
-	if len(remainingBranches) > 0 {
-		uiStopProgress()
-		uiSection(fmt.Sprintf("Branches (%d)", len(remainingBranches)))
-
-		for _, branch := range remainingBranches {
-			uiItem(branch)
-
-			pr, hasPR := prs[branch]
-			if hasPR {
-				uiPR(pr)
+		if hasBranch {
+			uiLocalCommits(ctx, r, defaultBranch, b)
+		}
+		if opts.DryRun {
+			uiOK("Would remove worktree " + displayText(wt.Path))
+			result.WorktreesPlanned++
+			if hasBranch {
+				uiOK("Would delete branch " + b.Name + " at " + b.OID)
+				result.BranchesPlanned++
+				handled[b.Name] = true
 			}
-
-			var confirmed bool
-			if opts.Auto {
-				confirmed = isMerged(prs, branch)
-			} else {
-				defaultVal := hasPR && pr.State != "OPEN"
-				var err error
-				confirmed, err = confirm("Delete branch?", defaultVal)
-				if errors.Is(err, ErrUserAborted) {
-					return result
-				} else if err != nil {
-					result.addErr("prompting for branch deletion", err)
-					continue
-				}
+			continue
+		}
+		title := "Remove this clean worktree?"
+		if hasBranch {
+			title = "Remove this clean worktree and delete its branch?"
+		}
+		yes, err := approve(ctx, title, opts.Auto)
+		if err != nil {
+			return result, err
+		}
+		if !yes {
+			uiKeep("declined")
+			result.WorktreesSkipped++
+			keepBranch(wt.Branch)
+			continue
+		}
+		if err := r.removeWorktree(ctx, wt, b, hasBranch); err != nil {
+			result.addErr("removing worktree", err)
+			result.WorktreesSkipped++
+			keepBranch(wt.Branch)
+			continue
+		}
+		uiOK("Removed worktree")
+		result.WorktreesRemoved++
+		if hasBranch {
+			handled[b.Name] = true
+			deleted, err := r.deleteBranch(ctx, b)
+			if err != nil {
+				result.addErr("deleting branch "+b.Name, err)
 			}
-
-			if confirmed {
-				if err := gitDeleteBranch(branch); err != nil {
-					result.addErr("deleting branch "+branch, err)
-				} else {
-					uiOK("Deleted")
-					result.BranchesDeleted++
-				}
+			if deleted {
+				uiOK("Deleted branch " + b.Name)
+				result.BranchesDeleted++
 			} else {
-				uiSkipped()
 				result.BranchesSkipped++
 			}
-			fmt.Println()
 		}
-	} else {
-		uiDim("No branches to clean up")
 	}
+	checkedOut := map[string]bool{}
+	remaining, err := r.worktrees(ctx)
+	if err != nil {
+		return fail("checking remaining worktrees", err)
+	}
+	for _, wt := range remaining {
+		checkedOut[wt.Branch] = true
+	}
+	for _, b := range candidates {
+		if handled[b.Name] {
+			continue
+		}
+		if err := ctx.Err(); err != nil {
+			return result, err
+		}
+		uiItem(b.Name + " (HEAD: " + b.OID + ")")
+		pr, hasPR := prs[b.Name]
+		if hasPR {
+			uiPR(pr)
+		}
+		reason := ""
+		if checkedOut[b.Name] {
+			reason = "checked out in a retained worktree"
+		} else if activeOperation != "" {
+			reason = activeOperation
+		} else if (opts.Auto || opts.DryRun) && !mergedBranch(pr, b) {
+			reason = "no merged PR matching this repository and commit"
+		}
+		if reason != "" {
+			uiKeep(reason)
+			result.BranchesSkipped++
+			continue
+		}
+		uiLocalCommits(ctx, r, defaultBranch, b)
+		if opts.DryRun {
+			uiOK("Would delete branch " + b.Name + " at " + b.OID)
+			result.BranchesPlanned++
+			continue
+		}
+		yes, err := approve(ctx, "Delete this branch?", opts.Auto)
+		if err != nil {
+			return result, err
+		}
+		if !yes {
+			uiKeep("declined")
+			result.BranchesSkipped++
+			continue
+		}
+		deleted, err := r.deleteBranch(ctx, b)
+		if err != nil {
+			result.addErr("deleting branch "+b.Name, err)
+		}
+		if deleted {
+			uiOK("Deleted branch " + b.Name)
+			result.BranchesDeleted++
+		} else {
+			result.BranchesSkipped++
+		}
+	}
+	if err := ctx.Err(); err != nil {
+		return result, err
+	}
+	if len(result.Errors) == 0 {
+		uiDone()
+	}
+	return result, nil
+}
 
-	uiStopProgress()
-	uiDone()
-
-	return result
+func approve(ctx context.Context, title string, auto bool) (bool, error) {
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
+	if auto {
+		return true, nil
+	}
+	return confirm(ctx, title, false)
+}
+func uiLocalCommits(ctx context.Context, r repository, base string, b Branch) {
+	out, err := r.git(ctx, "log", "--oneline", "-5", "refs/remotes/origin/"+base+".."+b.OID, "--")
+	if err == nil && strings.TrimSpace(out) != "" {
+		uiWarn("Commits not reachable from origin/" + base + " (may have been squash/rebase merged):")
+		for line := range strings.SplitSeq(strings.TrimSpace(out), "\n") {
+			uiDim(displayText(line))
+		}
+	}
+}
+func (r repository) inProgress(ctx context.Context) (string, error) {
+	out, err := r.git(ctx, "rev-parse", "--absolute-git-dir")
+	if err != nil {
+		return "", err
+	}
+	dir := strings.TrimSuffix(out, "\n")
+	for _, name := range []string{"rebase-merge", "rebase-apply", "MERGE_HEAD", "CHERRY_PICK_HEAD", "REVERT_HEAD", "sequencer", "BISECT_START"} {
+		if _, err := os.Stat(filepath.Join(dir, name)); err == nil {
+			return name, nil
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return "", err
+		}
+	}
+	return "", nil
+}
+func (r repository) removeWorktree(ctx context.Context, wt Worktree, b Branch, hasBranch bool) error {
+	fresh, err := r.worktrees(ctx)
+	if err != nil {
+		return err
+	}
+	found := false
+	for index, current := range fresh {
+		if canonicalPath(current.Path) != canonicalPath(wt.Path) {
+			continue
+		}
+		if index == 0 || r.protects(current.Path) || current.Locked || current.Prunable || current.OID != wt.OID || current.Branch != wt.Branch {
+			return errors.New("worktree changed or is protected; keeping it")
+		}
+		found = true
+	}
+	if !found {
+		return errors.New("worktree disappeared since discovery")
+	}
+	linked := r
+	linked.Dir = wt.Path
+	if state, err := linked.inProgress(ctx); err != nil {
+		return err
+	} else if state != "" {
+		return fmt.Errorf("%s in progress; keeping worktree", state)
+	}
+	if hasBranch {
+		if err := r.checkBranch(ctx, b); err != nil {
+			return err
+		}
+	}
+	status, err := r.status(ctx, wt.Path, true)
+	if err != nil {
+		return err
+	}
+	if status != "" {
+		return errors.New("worktree contains modified, untracked, or ignored files; keeping it")
+	}
+	_, err = r.git(ctx, "worktree", "remove", "--", wt.Path)
+	return err
 }

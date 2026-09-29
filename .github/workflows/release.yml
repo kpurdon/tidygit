@@ -1,0 +1,50 @@
+name: Release
+on:
+  push:
+    tags: ['v*']
+permissions:
+  contents: read
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: '1.27.x'
+      - run: go vet ./...
+      - run: go test -race ./...
+      - run: go run golang.org/x/vuln/cmd/govulncheck@v1.8.0 ./...
+      - name: Build archives
+        env:
+          VERSION: ${{ github.ref_name }}
+          CGO_ENABLED: '0'
+        run: |
+          mkdir dist
+          for os in darwin linux windows; do
+            for arch in amd64 arm64; do
+              name="tidygit_${VERSION}_${os}_${arch}"
+              stage="$RUNNER_TEMP/$name"
+              mkdir -p "$stage"
+              binary=tidygit
+              if [ "$os" = windows ]; then binary=tidygit.exe; fi
+              GOOS="$os" GOARCH="$arch" go build -trimpath -ldflags "-s -w -X main.version=$VERSION" -o "$stage/$binary" .
+              cp LICENSE README.md "$stage/"
+              if [ "$os" = windows ]; then
+                (cd "$stage" && zip "$GITHUB_WORKSPACE/dist/$name.zip" "$binary" LICENSE README.md)
+              else
+                tar -czf "dist/$name.tar.gz" -C "$stage" "$binary" LICENSE README.md
+              fi
+            done
+          done
+          (cd dist && sha256sum ./* > checksums.txt)
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          VERSION: ${{ github.ref_name }}
+        run: gh release create "$VERSION" dist/* --verify-tag --generate-notes --title "$VERSION"

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
 
@@ -11,10 +12,10 @@ import (
 var ErrUserAborted = errors.New("user aborted")
 
 type confirmModel struct {
-	title    string
-	value    bool
-	done     bool
-	aborted  bool
+	title   string
+	value   bool
+	done    bool
+	aborted bool
 }
 
 func (m confirmModel) Init() tea.Cmd {
@@ -23,7 +24,7 @@ func (m confirmModel) Init() tea.Cmd {
 
 func (m confirmModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
-	case tea.KeyMsg:
+	case tea.KeyPressMsg:
 		switch msg.String() {
 		case "y", "Y":
 			m.value = true
@@ -64,15 +65,18 @@ func (m confirmModel) View() tea.View {
 
 // confirm shows an interactive yes/no prompt and returns the user's choice.
 // It returns ErrUserAborted if the user presses Ctrl+C.
-func confirm(title string, defaultValue bool) (bool, error) {
+func confirm(ctx context.Context, title string, defaultValue bool) (bool, error) {
 	m := confirmModel{
 		title: title,
 		value: defaultValue,
 	}
 
-	p := tea.NewProgram(m)
+	p := tea.NewProgram(m, tea.WithContext(ctx))
 	result, err := p.Run()
 	if err != nil {
+		if ctx.Err() != nil {
+			return false, ctx.Err()
+		}
 		return false, err
 	}
 
@@ -81,5 +85,5 @@ func confirm(title string, defaultValue bool) (bool, error) {
 		return false, ErrUserAborted
 	}
 
-	return final.value, nil
+	return final.done && final.value, nil
 }

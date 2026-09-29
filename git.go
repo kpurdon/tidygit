@@ -1,142 +1,232 @@
 package main
 
 import (
+	"bytes"
+	"context"
+	"errors"
 	"fmt"
+	"os"
 	"os/exec"
+	"path/filepath"
+	"regexp"
 	"strings"
+	"time"
 )
 
+type repository struct {
+	Dir, CommonDir, ProtectedPath string
+	Timeout                       time.Duration
+}
+
+type Branch struct{ Name, OID, SourceRepo, SourceBranch string }
 type Worktree struct {
-	Path   string
-	Branch string
+	Path, Branch, OID string
+	Locked, Prunable  bool
 }
 
-func gitDefaultBranch() (string, error) {
-	out, err := exec.Command("git", "remote", "show", "origin").CombinedOutput()
+func (r repository) command(ctx context.Context, name string, args ...string) (string, error) {
+	if r.Timeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, r.Timeout)
+		defer cancel()
+	}
+	cmd := exec.CommandContext(ctx, name, args...)
+	cmd.Dir = r.Dir
+	cmd.Env = append(os.Environ(), "GIT_OPTIONAL_LOCKS=0", "GIT_TERMINAL_PROMPT=0", "GH_PROMPT_DISABLED=1")
+	cmd.WaitDelay = 2 * time.Second
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	out, err := cmd.Output()
+	if ctx.Err() != nil {
+		return "", fmt.Errorf("%s %s: %w", name, strings.Join(args, " "), ctx.Err())
+	}
 	if err != nil {
-		return "", fmt.Errorf("getting default branch: %w", err)
+		return "", fmt.Errorf("%s %s: %w: %s", name, strings.Join(args, " "), err, strings.TrimSpace(stderr.String()))
 	}
-	for _, line := range strings.Split(string(out), "\n") {
-		line = strings.TrimSpace(line)
-		if strings.HasPrefix(line, "HEAD branch:") {
-			return strings.TrimSpace(strings.TrimPrefix(line, "HEAD branch:")), nil
-		}
-	}
-	return "", fmt.Errorf("getting default branch: HEAD branch not found in remote output")
+	return string(out), nil
+}
+func (r repository) git(ctx context.Context, args ...string) (string, error) {
+	return r.command(ctx, "git", args...)
 }
 
-func gitHasUncommittedChanges() bool {
-	err := exec.Command("git", "diff-index", "--quiet", "HEAD", "--").Run()
-	return err != nil
+func canonicalPath(path string) string {
+	abs, err := filepath.Abs(path)
+	if err == nil {
+		path = abs
+	}
+	if real, err := filepath.EvalSymlinks(path); err == nil {
+		return real
+	}
+	return filepath.Clean(path)
 }
-
-func gitResetHard() error {
-	out, err := exec.Command("git", "reset", "--hard", "HEAD").CombinedOutput()
+func discoverRepo(ctx context.Context, dir string, timeout time.Duration) (repository, error) {
+	r := repository{Dir: canonicalPath(dir), Timeout: timeout}
+	out, err := r.git(ctx, "rev-parse", "--show-toplevel")
 	if err != nil {
-		return fmt.Errorf("resetting HEAD: %s: %w", strings.TrimSpace(string(out)), err)
+		return r, err
 	}
-	return nil
+	r.Dir = canonicalPath(strings.TrimSuffix(out, "\n"))
+	out, err = r.git(ctx, "rev-parse", "--path-format=absolute", "--git-common-dir")
+	if err != nil {
+		return r, err
+	}
+	r.CommonDir = canonicalPath(strings.TrimSuffix(out, "\n"))
+	r.ProtectedPath = r.Dir
+	return r, nil
 }
 
-func gitSwitch(branch string) error {
-	out, err := exec.Command("git", "switch", branch).CombinedOutput()
+func (r repository) defaultBranch(ctx context.Context) (string, error) {
+	out, err := r.git(ctx, "ls-remote", "--symref", "origin", "HEAD")
 	if err != nil {
-		return fmt.Errorf("switching to %s: %s: %w", branch, strings.TrimSpace(string(out)), err)
+		return "", err
 	}
-	return nil
-}
-
-func gitFetchAll() error {
-	out, err := exec.Command("git", "fetch", "--all", "--prune").CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("fetching: %s: %w", strings.TrimSpace(string(out)), err)
-	}
-	return nil
-}
-
-func gitPull(branch string) error {
-	out, err := exec.Command("git", "pull", "--rebase", "origin", branch).CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("pulling with rebase: %s: %w", strings.TrimSpace(string(out)), err)
-	}
-	return nil
-}
-
-func gitPruneWorktrees() error {
-	out, err := exec.Command("git", "worktree", "prune").CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("pruning worktrees: %s: %w", strings.TrimSpace(string(out)), err)
-	}
-	return nil
-}
-
-func gitListWorktrees() ([]Worktree, error) {
-	out, err := exec.Command("git", "worktree", "list", "--porcelain").CombinedOutput()
-	if err != nil {
-		return nil, fmt.Errorf("listing worktrees: %s: %w", strings.TrimSpace(string(out)), err)
-	}
-
-	var worktrees []Worktree
-	var current Worktree
-	first := true
-
-	for _, line := range strings.Split(string(out), "\n") {
-		switch {
-		case strings.HasPrefix(line, "worktree "):
-			if first {
-				// Skip the main worktree (first entry)
-				first = false
-				current = Worktree{}
-				continue
-			}
-			current = Worktree{Path: strings.TrimPrefix(line, "worktree ")}
-		case strings.HasPrefix(line, "branch "):
-			if current.Path != "" {
-				current.Branch = strings.TrimPrefix(line, "branch refs/heads/")
-			}
-		case line == "":
-			if current.Path != "" {
-				worktrees = append(worktrees, current)
-				current = Worktree{}
+	for line := range strings.SplitSeq(out, "\n") {
+		if target, ok := strings.CutPrefix(line, "ref: refs/heads/"); ok {
+			name, ref, ok := strings.Cut(target, "\t")
+			if ok && ref == "HEAD" && name != "" {
+				return name, nil
 			}
 		}
 	}
-	// Handle last entry if no trailing newline
+	return "", errors.New("origin does not advertise a default branch")
+}
+func (r repository) worktrees(ctx context.Context) ([]Worktree, error) {
+	out, err := r.git(ctx, "worktree", "list", "--porcelain", "-z")
+	if err != nil {
+		return nil, err
+	}
+	var result []Worktree
+	current := Worktree{}
+	for field := range strings.SplitSeq(out, "\x00") {
+		key, value, _ := strings.Cut(field, " ")
+		switch key {
+		case "worktree":
+			current.Path = value
+		case "HEAD":
+			current.OID = value
+		case "branch":
+			current.Branch = strings.TrimPrefix(value, "refs/heads/")
+		case "locked":
+			current.Locked = true
+		case "prunable":
+			current.Prunable = true
+		case "":
+			if current.Path != "" {
+				result = append(result, current)
+				current = Worktree{}
+			}
+		}
+	}
 	if current.Path != "" {
-		worktrees = append(worktrees, current)
+		result = append(result, current)
 	}
-
-	return worktrees, nil
+	return result, nil
 }
-
-func gitListBranches(exclude string) ([]string, error) {
-	out, err := exec.Command("git", "branch", "--format=%(refname:short)").CombinedOutput()
+func (r repository) branches(ctx context.Context) ([]Branch, error) {
+	out, err := r.git(ctx, "for-each-ref", "--format=%(refname:strip=2)%00%(objectname)%00%(upstream:remotename)%00%(upstream:remoteref)", "refs/heads/")
 	if err != nil {
-		return nil, fmt.Errorf("listing branches: %s: %w", strings.TrimSpace(string(out)), err)
+		return nil, err
 	}
-
-	var branches []string
-	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
-		line = strings.TrimSpace(line)
-		if line != "" && line != exclude {
-			branches = append(branches, line)
+	remotes := map[string]string{}
+	var result []Branch
+	for line := range strings.SplitSeq(strings.TrimSuffix(out, "\n"), "\n") {
+		if line == "" {
+			continue
+		}
+		fields := strings.Split(line, "\x00")
+		if len(fields) != 4 {
+			return nil, errors.New("invalid branch inventory")
+		}
+		b := Branch{Name: fields[0], OID: fields[1], SourceBranch: fields[0]}
+		remote := fields[2]
+		if remote == "" {
+			remote = "origin"
+		}
+		if remote != "." {
+			identity, ok := remotes[remote]
+			if !ok {
+				url, err := r.git(ctx, "remote", "get-url", remote)
+				if err != nil {
+					return nil, err
+				}
+				identity, _ = githubRepo(strings.TrimSpace(url))
+				remotes[remote] = identity
+			}
+			b.SourceRepo = identity
+			if ref, ok := strings.CutPrefix(fields[3], "refs/heads/"); ok {
+				b.SourceBranch = ref
+			}
+		}
+		result = append(result, b)
+	}
+	return result, nil
+}
+func (r repository) status(ctx context.Context, path string, ignored bool) (string, error) {
+	args := []string{"-C", path, "status", "--porcelain=v1", "-z", "--untracked-files=all"}
+	if ignored {
+		args = append(args, "--ignored")
+	}
+	return r.git(ctx, args...)
+}
+func (r repository) checkBranch(ctx context.Context, b Branch) error {
+	out, err := r.git(ctx, "rev-parse", "--verify", "refs/heads/"+b.Name)
+	if err != nil {
+		return err
+	}
+	if strings.TrimSpace(out) != b.OID {
+		return fmt.Errorf("branch %s changed since discovery; keeping it", b.Name)
+	}
+	return nil
+}
+func (r repository) deleteBranch(ctx context.Context, b Branch) (bool, error) {
+	if err := r.checkBranch(ctx, b); err != nil {
+		return false, err
+	}
+	worktrees, err := r.worktrees(ctx)
+	if err != nil {
+		return false, err
+	}
+	for _, wt := range worktrees {
+		if wt.Branch == b.Name {
+			return false, fmt.Errorf("branch %s is checked out in %s; keeping it", b.Name, wt.Path)
 		}
 	}
-	return branches, nil
+	if state, err := r.worktreeOperation(ctx, worktrees); err != nil {
+		return false, err
+	} else if state != "" {
+		return false, fmt.Errorf("%s; keeping branch %s", state, b.Name)
+	}
+	// Compare and delete under Git's ref lock so a newly updated tip is never discarded.
+	if _, err := r.git(ctx, "update-ref", "--no-deref", "-d", "refs/heads/"+b.Name, b.OID); err != nil {
+		return false, err
+	}
+	_, err = r.git(ctx, "config", "--local", "--get-regexp", "^branch\\."+regexp.QuoteMeta(b.Name)+"\\.")
+	if err != nil {
+		if exit, ok := errors.AsType[*exec.ExitError](err); ok && exit.ExitCode() == 1 {
+			return true, nil
+		}
+		return true, err
+	}
+	_, err = r.git(ctx, "config", "--local", "--remove-section", "branch."+b.Name)
+	return true, err
 }
 
-func gitRemoveWorktree(path string) error {
-	out, err := exec.Command("git", "worktree", "remove", path, "--force").CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("removing worktree %s: %s: %w", path, strings.TrimSpace(string(out)), err)
-	}
-	return nil
+func (r repository) protects(path string) bool {
+	path = canonicalPath(path)
+	return path == r.Dir || path == r.ProtectedPath
 }
 
-func gitDeleteBranch(name string) error {
-	out, err := exec.Command("git", "branch", "-D", name).CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("deleting branch %s: %s: %w", name, strings.TrimSpace(string(out)), err)
+func (r repository) worktreeOperation(ctx context.Context, worktrees []Worktree) (string, error) {
+	for _, wt := range worktrees {
+		linked := r
+		linked.Dir = wt.Path
+		state, err := linked.inProgress(ctx)
+		if err != nil {
+			return "", err
+		}
+		if state != "" {
+			return fmt.Sprintf("%s in progress in %s", state, wt.Path), nil
+		}
 	}
-	return nil
+	return "", nil
 }
