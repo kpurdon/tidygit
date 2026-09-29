@@ -34,6 +34,8 @@ Worktrees and standalone branches with no open PR become eligible after **14 day
 
 For clean completed worktrees, ignored files are archived before removal. Archives live under `${XDG_STATE_HOME:-~/.local/state}/tidygit/archives`, include recovery instructions, and are never automatically expired. Their locations appear during cleanup, not in the summary. Worktree archival is supported on macOS and Linux and requires the archive to be on the same filesystem. A failure retains original files or reports their recoverable archive location. The primary checkout and its ignored files, the current checkout, default branch, and locked worktrees are protected. Cleanup pauses while a worktree has an active Git operation such as a rebase or bisect. Rebasing is skipped when local files, including ignored files, are present. Automatic cleanup fails when required GitHub evidence is unavailable.
 
+Clean, verified-complete worktrees with submodules preserve the entire checkout and its owned submodule Git storage before removal, including ignored files and local history. Shared or external submodule storage and unsupported nested repositories are retained with a `KEPT` explanation. Submodule worktrees with local changes or without verified completion remain for manual cleanup.
+
 To reserve a branch and its worktree for manual cleanup, add its exact name to the repository configuration: `git config --local --add tidygit.keep my-branch`. Repeat for additional branches. Remove an exemption with `git config --local --fixed-value --unset-all tidygit.keep my-branch`. Git's `worktree lock` also protects a worktree.
 
 Packed branches without surviving reflog events or an individual update timestamp have unknown activity age and remain for manual cleanup.

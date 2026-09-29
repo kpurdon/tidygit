@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -34,6 +35,15 @@ func TestDetachedSquashCompletionArchivesLocalHistory(t *testing.T) {
 	if err != nil || !complete || !archive {
 		t.Fatalf("squash completion must preserve history: complete=%v archive=%v err=%v", complete, archive, err)
 	}
+	missing := strings.Repeat("f", 40)
+	f.write(f.prs, "["+strings.ReplaceAll(pr, merged, missing)+"]")
+	f.write(graphPath, strings.ReplaceAll(graph, merged, missing))
+	_, complete, _, err = detachedCompletion(t.Context(), f.repo, wt, "main", defaultOptions())
+	if err != nil || complete {
+		t.Fatalf("unfetched merge must remain unverified without failing preview: %v %v", complete, err)
+	}
+	f.write(f.prs, "["+pr+"]")
+	f.write(graphPath, graph)
 	f.write(filepath.Join(path, "extra"), "unmerged addition\n")
 	f.run(path, "commit", "-am", "unmerged local change")
 	wt.OID = f.run(path, "rev-parse", "HEAD")

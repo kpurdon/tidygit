@@ -197,6 +197,8 @@ func TestStaleArchiveRetainsNestedRepositories(t *testing.T) {
 			nested := filepath.Join(path, "nested")
 			if submodule {
 				f.run(path, "-c", "protocol.file.allow=always", "submodule", "add", f.dir, "nested")
+				childAdmin := f.run(nested, "rev-parse", "--absolute-git-dir")
+				f.write(filepath.Join(childAdmin, "objects", "info", "alternates"), filepath.Join(f.dir, ".git", "objects")+"\n")
 			} else {
 				f.run(path, "init", nested)
 			}

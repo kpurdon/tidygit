@@ -282,6 +282,18 @@ func cleanRepository(ctx context.Context, r repository, opts options) (result re
 			}
 		}
 
+		if reason == "" {
+			hasSubmodules, policyErr := r.submoduleArchivePolicy(ctx, wt)
+			if policyErr != nil {
+				reason = "submodule or nested repository needs manual cleanup: " + policyErr.Error()
+			} else if hasSubmodules {
+				if !complete || stale {
+					reason = "submodule worktrees require clean, verified completion before archiving"
+				} else {
+					archiveAll = true
+				}
+			}
+		}
 		if reason == "" && !archiveAll {
 			var err error
 			ignored, err = ignoredPaths(ctx, r, wt.Path)

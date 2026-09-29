@@ -5,10 +5,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io/fs"
+	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 )
@@ -37,12 +38,31 @@ func (r repository) archiveStaleWorktree(ctx context.Context, wt Worktree, b Bra
 	}
 	linked := r
 	linked.Dir = wt.Path
-	if err = linked.checkRecoveryRepositories(ctx); err != nil {
+	plan, err := r.submoduleRecoveryPlan(ctx, wt)
+	if err != nil {
 		return "", err
 	}
 	gitDir, err := linked.gitDir(ctx)
 	if err != nil {
 		return "", err
+	}
+	var adminParent, ownedAdmin *os.Root
+	var adminInfo os.FileInfo
+	if plan.hasSubmodules {
+		adminParent, err = os.OpenRoot(filepath.Dir(plan.admin))
+		if err != nil {
+			return "", err
+		}
+		defer adminParent.Close()
+		adminInfo, err = adminParent.Lstat(filepath.Base(plan.admin))
+		if err != nil {
+			return "", err
+		}
+		ownedAdmin, err = adminParent.OpenRoot(filepath.Base(plan.admin))
+		if err != nil {
+			return "", err
+		}
+		defer ownedAdmin.Close()
 	}
 	// Git writers honor index.lock. Holding it keeps the staged snapshot stable
 	// while files are relocated; ordinary file writes remain part of the archive.
@@ -54,6 +74,13 @@ func (r repository) archiveStaleWorktree(ctx context.Context, wt Worktree, b Bra
 	defer lock.Close()
 	defer func() {
 		held, heldErr := lock.Stat()
+		if ownedAdmin != nil {
+			current, currentErr := ownedAdmin.Lstat("index.lock")
+			if heldErr == nil && currentErr == nil && os.SameFile(held, current) {
+				_ = ownedAdmin.Remove("index.lock")
+			}
+			return
+		}
 		current, currentErr := os.Lstat(lockPath)
 		if heldErr == nil && currentErr == nil && os.SameFile(held, current) {
 			_ = os.Remove(lockPath)
@@ -134,6 +161,14 @@ func (r repository) archiveStaleWorktree(ctx context.Context, wt Worktree, b Bra
 	}
 	var readme strings.Builder
 	fmt.Fprintf(&readme, "Original worktree (Go-quoted): %q\nBranch (Go-quoted): %q\nOriginal HEAD: %s\nStaging snapshot: %s\nStaging ref: %s\n\nThe complete original worktree is in files/%s, including ignored files and symlinks. The old .git pointer is preserved separately as gitdir.original; do not restore it.\n\nRecovery in a NEW directory:\n1. Run git init, then git fetch /absolute/path/to/history.bundle 'refs/tidygit/*:refs/tidygit/*' HEAD.\n2. Run git checkout --detach %s.\n3. Replace the new checkout contents (except .git) with the contents of files/%s, excluding its .git file. Preserve symlinks and permissions.\n4. Copy this archive's index file to the new checkout's .git/index.\nThis restores staged versus unstaged changes, deletions, untracked files, and ignored files. index.original is the untouched original index; index is the self-contained recovery copy.\nNever overwrite a directory containing other work. If archival failed, files may still be at the original path.\n", wt.Path, wt.Branch, wt.OID, snapshot, ref, filepath.Base(wt.Path), wt.OID, filepath.Base(wt.Path))
+	if plan.hasSubmodules {
+		readme.WriteString("\nSubmodule recovery:\nThe complete owned worktree metadata is preserved in git-admin, including submodule objects, refs, stashes, reflogs, and indexes. This directory is data, not a usable parent repository: its commondir points to the old repository. Original child .git pointers are stored separately under submodule-gitfiles; never restore those old pointers.\nFor each initialized child below, copy its Git directory from git-admin to the child's .git directory in the recovered checkout, then run git config --file <child/.git/config> --unset-all core.worktree (if present). Preserve the existing child files and index; do not run checkout or reset. Repeat for nested children. Metadata for removed/deinitialized children remains under git-admin/modules; its config core.worktree records the original checkout location.\n")
+		for _, path := range slices.Sorted(maps.Keys(plan.modules)) {
+			rel, _ := filepath.Rel(plan.admin, plan.modules[path])
+			fmt.Fprintf(&readme, "Child path (Go-quoted): %q; archived Git directory (Go-quoted): %q\n", path, filepath.Join("git-admin", rel))
+		}
+		readme.WriteString("If archival stopped after moving files but before moving metadata, the original Git admin directory remains locked to prevent pruning. Recover it before removing that lock.\n")
+	}
 	if err = os.WriteFile(filepath.Join(archive, "README.txt"), []byte(readme.String()), 0o600); err != nil {
 		return archive, err
 	}
@@ -153,6 +188,42 @@ func (r repository) archiveStaleWorktree(ctx context.Context, wt Worktree, b Bra
 	}
 	if !os.SameFile(sourceInfo, currentInfo) {
 		return archive, errors.New("worktree directory changed during archival")
+	}
+	var protection *os.File
+	filesMoved, adminMoved := false, false
+	if plan.hasSubmodules {
+		freshPlan, policyErr := r.submoduleRecoveryPlan(ctx, wt)
+		if policyErr != nil {
+			return archive, policyErr
+		}
+		if freshPlan.admin != plan.admin || !maps.Equal(freshPlan.modules, plan.modules) {
+			return archive, errors.New("submodule metadata changed during archival")
+		}
+		currentAdmin, statErr := adminParent.Lstat(filepath.Base(plan.admin))
+		if statErr != nil {
+			return archive, statErr
+		}
+		if !os.SameFile(adminInfo, currentAdmin) {
+			return archive, errors.New("owned worktree metadata changed during archival")
+		}
+		protection, err = ownedAdmin.OpenFile("locked", os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+		if err != nil {
+			return archive, fmt.Errorf("protect owned submodule metadata from pruning: %w", err)
+		}
+		defer protection.Close()
+		defer func() {
+			if filesMoved && !adminMoved {
+				return
+			}
+			held, heldErr := protection.Stat()
+			current, currentErr := ownedAdmin.Lstat("locked")
+			if heldErr == nil && currentErr == nil && os.SameFile(held, current) {
+				_ = ownedAdmin.Remove("locked")
+			}
+		}()
+		if _, err = protection.WriteString("tidygit recovery in progress; preserve Git metadata until archive recovery is complete\n"); err != nil {
+			return archive, err
+		}
 	}
 	sourceParent, err := sourceRoot.Open(".")
 	if err != nil {
@@ -174,6 +245,7 @@ func (r repository) archiveStaleWorktree(ctx context.Context, wt Worktree, b Bra
 	if err = renamePinnedArchive(sourceParent, destinationParent, filepath.Base(wt.Path)); err != nil {
 		return archive, fmt.Errorf("move whole worktree (archive must share its filesystem): %w", err)
 	}
+	filesMoved = true
 	movedInfo, err := os.Lstat(filepath.Join(files, filepath.Base(wt.Path)))
 	if err != nil {
 		return archive, err
@@ -184,16 +256,62 @@ func (r repository) archiveStaleWorktree(ctx context.Context, wt Worktree, b Bra
 	if _, statErr := sourceRoot.Lstat(filepath.Base(wt.Path)); !errors.Is(statErr, os.ErrNotExist) {
 		return archive, fmt.Errorf("original worktree path reappeared or could not be checked: %v", statErr)
 	}
-	// Without --force, Git refuses to delete any nonempty directory that races
-	// into the old path. The already-moved directory is never recursively deleted.
-	if _, err = r.git(ctx, "worktree", "remove", "--", wt.Path); err != nil {
-		return archive, err
+	if plan.hasSubmodules {
+		staging := filepath.Join(archive, "admin-relocation")
+		if err = os.Mkdir(staging, 0o700); err != nil {
+			return archive, err
+		}
+		target, openErr := os.Open(staging)
+		if openErr != nil {
+			return archive, openErr
+		}
+		defer target.Close()
+		source, openErr := adminParent.Open(".")
+		if openErr != nil {
+			return archive, openErr
+		}
+		defer source.Close()
+		if err = renamePinnedArchive(source, target, filepath.Base(plan.admin)); err != nil {
+			return archive, fmt.Errorf("preserve owned Git metadata (original remains locked): %w", err)
+		}
+		adminMoved = true
+		movedAdmin, statErr := os.Lstat(filepath.Join(staging, filepath.Base(plan.admin)))
+		if statErr != nil {
+			return archive, statErr
+		}
+		if !os.SameFile(adminInfo, movedAdmin) {
+			return archive, errors.New("owned metadata changed during relocation; preserve both original and archived directories")
+		}
+	} else {
+		// Never force-delete a directory that races into the now-missing old path.
+		if _, err = r.git(ctx, "worktree", "remove", "--", wt.Path); err != nil {
+			return archive, err
+		}
 	}
 	archiveRoot, err := os.OpenRoot(archive)
 	if err != nil {
 		return archive, err
 	}
 	defer archiveRoot.Close()
+	if plan.hasSubmodules {
+		if err = archiveRoot.Rename(filepath.Join("admin-relocation", filepath.Base(plan.admin)), "git-admin"); err != nil {
+			return archive, err
+		}
+		if err = archiveRoot.Remove("admin-relocation"); err != nil {
+			return archive, err
+		}
+		// Each stale pointer could otherwise reconnect to a newly reused admin path.
+		for _, path := range slices.Sorted(maps.Keys(plan.modules)) {
+			saved := filepath.Join("submodule-gitfiles", path, "gitdir.original")
+			if err = archiveRoot.MkdirAll(filepath.Dir(saved), 0o700); err != nil {
+				return archive, err
+			}
+			if err = archiveRoot.Rename(filepath.Join("files", filepath.Base(wt.Path), path, ".git"), saved); err != nil {
+				return archive, err
+			}
+		}
+
+	}
 	// The old admin path may be reused by a future worktree. Keep its pointer as
 	// recovery metadata, never as an active .git file inside the archived payload.
 	if err = archiveRoot.Rename(filepath.Join("files", filepath.Base(wt.Path), ".git"), "gitdir.original"); err != nil {
@@ -309,38 +427,4 @@ func (r repository) archiveBranchHistory(ctx context.Context, b Branch) (archive
 		return archive, err
 	}
 	return archive, nil
-}
-
-// Nested repositories can store their index and objects outside this directory;
-// the parent's bundle cannot make those independent histories recoverable.
-func (r repository) checkRecoveryRepositories(ctx context.Context) error {
-	entries, err := r.git(ctx, "ls-files", "--stage", "-z")
-	if err != nil {
-		return err
-	}
-	for entry := range strings.SplitSeq(entries, "\x00") {
-		if strings.HasPrefix(entry, "160000 ") {
-			return errors.New("worktree contains submodules; archive their repositories separately before cleanup")
-		}
-	}
-	return filepath.WalkDir(r.Dir, func(path string, entry fs.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		if path == r.Dir {
-			return nil
-		}
-		if strings.EqualFold(entry.Name(), ".git") {
-			if filepath.Dir(path) != r.Dir {
-				return fmt.Errorf("nested Git repository %q requires separate recovery archival", filepath.Dir(path))
-			}
-			if entry.IsDir() {
-				return filepath.SkipDir
-			}
-		}
-		return nil
-	})
 }

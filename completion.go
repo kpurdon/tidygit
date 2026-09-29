@@ -50,7 +50,16 @@ func detachedCompletion(ctx context.Context, r repository, wt Worktree, base str
 			complete = true
 			evidence = pr
 		}
-		if pr.State == "MERGED" && pr.MergeCommit != nil && pr.MergeCommit.OID != "" {
+		if !complete && pr.State == "MERGED" && pr.MergeCommit != nil && pr.MergeCommit.OID != "" {
+			// A read-only preview may see a PR merged since the last local fetch.
+			// Missing optional evidence cannot establish squash completion.
+			_, lookupErr := r.git(ctx, "rev-parse", "--verify", "--quiet", pr.MergeCommit.OID+"^{commit}")
+			if lookupErr != nil {
+				if exit, ok := errors.AsType[*exec.ExitError](lookupErr); ok && exit.ExitCode() == 1 {
+					continue
+				}
+				return pr, false, false, lookupErr
+			}
 			integrated, checkErr := r.isAncestor(ctx, pr.MergeCommit.OID, "refs/remotes/origin/"+base)
 			if checkErr != nil {
 				return pr, false, false, checkErr

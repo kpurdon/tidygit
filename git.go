@@ -165,7 +165,7 @@ func (r repository) branches(ctx context.Context) ([]Branch, error) {
 	return result, nil
 }
 func (r repository) status(ctx context.Context, path string, ignored bool) (string, error) {
-	args := []string{"-C", path, "status", "--porcelain=v1", "-z", "--untracked-files=all"}
+	args := []string{"-C", path, "status", "--porcelain=v1", "-z", "--untracked-files=all", "--ignore-submodules=none"}
 	if ignored {
 		args = append(args, "--ignored")
 	}
