@@ -181,3 +181,98 @@ func TestInvalidateRunMarker(t *testing.T) {
 		t.Fatalf("stale marker retained: %v %v", match, err)
 	}
 }
+
+func TestSnapshotPredictsOnlyOwnedCleanup(t *testing.T) {
+	f := newCleanupFixture(t)
+	path := filepath.Join(f.root, "linked")
+	oid := f.branch("drop", path)
+	f.run(f.dir, "config", "branch.drop.remote", "origin")
+	f.run(f.dir, "config", "branch.drop.merge", "refs/heads/drop")
+	f.run(f.dir, "config", "branch.drop.extra.remote", "origin")
+	include := filepath.Join(f.root, "included-config")
+	f.write(include, "[branch \"drop\"]\n\tdescription = included keep\n")
+	f.run(f.dir, "config", "include.path", include)
+	global := filepath.Join(f.root, "global-config")
+	f.write(global, "[branch \"drop\"]\n\tdescription = global keep\n")
+	t.Setenv("GIT_CONFIG_GLOBAL", global)
+	opts := defaultOptions()
+	opts.StaleDays = 0
+	baseline, err := localSnapshot(t.Context(), f.repo, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var removed Worktree
+	for _, wt := range baseline.Worktrees {
+		if wt.Branch == "drop" {
+			removed = wt
+		}
+	}
+	expected, ok := baseline.AfterCleanup([]Branch{{Name: "drop", OID: oid}}, []Worktree{removed})
+	if !ok {
+		t.Fatal("valid deletion rejected")
+	}
+	if _, ok := baseline.AfterCleanup([]Branch{{Name: "drop", OID: "changed"}}, nil); ok {
+		t.Fatal("wrong branch OID accepted")
+	}
+	bad := removed
+	bad.OID = "changed"
+	if _, ok := baseline.AfterCleanup(nil, []Worktree{bad}); ok {
+		t.Fatal("wrong worktree OID accepted")
+	}
+	f.run(f.dir, "worktree", "remove", path)
+	if deleted, err := f.repo.deleteBranch(t.Context(), Branch{Name: "drop", OID: oid}); err != nil || !deleted {
+		t.Fatalf("delete: %v %v", deleted, err)
+	}
+	actual, err := localSnapshot(t.Context(), f.repo, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if expected != actual.Fingerprint() {
+		t.Fatal("owned cleanup fingerprint differs from prediction")
+	}
+	if baseline.Fingerprint() == expected {
+		t.Fatal("prediction mutated baseline or did not change")
+	}
+	for _, change := range []struct {
+		name  string
+		apply func()
+	}{
+		{"branch", func() { f.run(f.dir, "branch", "concurrent") }},
+		{"worktree", func() {
+			f.run(f.dir, "worktree", "add", "-b", "concurrent-tree", filepath.Join(f.root, "concurrent-tree"))
+		}},
+		{"file", func() { f.write(filepath.Join(f.dir, "tracked"), "concurrent edit") }},
+		{"config", func() { f.run(f.dir, "config", "tidygit.keep", "concurrent") }},
+	} {
+		change.apply()
+		current, err := localSnapshot(t.Context(), f.repo, opts)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if current.Fingerprint() == expected {
+			t.Fatalf("concurrent %s was marked handled", change.name)
+		}
+		expected = current.Fingerprint()
+	}
+}
+
+func TestLocalFingerprintIgnoresBinaryVersion(t *testing.T) {
+	f := newCleanupFixture(t)
+	opts := defaultOptions()
+	opts.StaleDays = 0
+	previous := version
+	t.Cleanup(func() { version = previous })
+	version = "before-ui-change"
+	before, err := localFingerprint(t.Context(), f.repo, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	version = "after-ui-change"
+	after, err := localFingerprint(t.Context(), f.repo, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if before != after {
+		t.Fatal("binary version invalidated unchanged local state")
+	}
+}

@@ -16,21 +16,13 @@ import (
 // history, and the current commit all count, even for ignored files.
 func worktreeLastActivity(ctx context.Context, r repository, wt Worktree) (time.Time, error) {
 	r.Dir = wt.Path
-	out, err := r.git(ctx, "log", "-1", "--format=%ct", "HEAD")
-	if err != nil {
-		return time.Time{}, err
-	}
-	seconds, err := strconv.ParseInt(strings.TrimSpace(out), 10, 64)
-	if err != nil {
-		return time.Time{}, fmt.Errorf("read worktree commit time: %w", err)
-	}
-	latest := time.Unix(seconds, 0)
+	var latest time.Time
 	observe := func(info fs.FileInfo) {
 		if info.ModTime().After(latest) {
 			latest = info.ModTime()
 		}
 	}
-	err = filepath.WalkDir(wt.Path, func(path string, entry fs.DirEntry, walkErr error) error {
+	err := filepath.WalkDir(wt.Path, func(path string, entry fs.DirEntry, walkErr error) error {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
@@ -49,6 +41,26 @@ func worktreeLastActivity(ctx context.Context, r repository, wt Worktree) (time.
 	})
 	if err != nil {
 		return time.Time{}, err
+	}
+	return worktreeMetadataActivity(ctx, r, latest)
+}
+
+func worktreeMetadataActivity(ctx context.Context, r repository, latest time.Time) (time.Time, error) {
+	out, err := r.git(ctx, "log", "-1", "--format=%ct", "HEAD")
+	if err != nil {
+		return time.Time{}, err
+	}
+	seconds, err := strconv.ParseInt(strings.TrimSpace(out), 10, 64)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("read worktree commit time: %w", err)
+	}
+	if committed := time.Unix(seconds, 0); committed.After(latest) {
+		latest = committed
+	}
+	observe := func(info fs.FileInfo) {
+		if info.ModTime().After(latest) {
+			latest = info.ModTime()
+		}
 	}
 	admin, err := r.gitDir(ctx)
 	if err != nil {

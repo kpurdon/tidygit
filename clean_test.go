@@ -438,7 +438,6 @@ func TestArchiveFailureKeepsWorktree(t *testing.T) {
 
 func TestLocalMarkerSkipsNetworkUntilForceOrLocalChange(t *testing.T) {
 	f := newCleanupFixture(t)
-	f.run(f.dir, "remote", "set-head", "origin", "main")
 	log := filepath.Join(f.root, "fetches")
 	t.Setenv("TEST_FETCH_LOG", log)
 	f.write(filepath.Join(f.root, "bin", "git"), "#!/bin/sh\nif [ \"$1\" = remote ] && [ \"$2\" = get-url ]; then exec \"$TEST_REAL_GIT\" config --get \"remote.$3.url\"; fi\nif [ \"$1\" = fetch ]; then echo fetch >> \"$TEST_FETCH_LOG\"; fi\nexec \"$TEST_REAL_GIT\" \"$@\"\n")
@@ -481,6 +480,76 @@ func TestLocalMarkerSkipsNetworkUntilForceOrLocalChange(t *testing.T) {
 		t.Fatal("failed forced run left a matching marker")
 	}
 
+}
+
+func TestLocalMarkerIncludesOwnUpdateAndCleanup(t *testing.T) {
+	f := newCleanupFixture(t)
+	old := f.run(f.dir, "rev-parse", "HEAD")
+	path := filepath.Join(f.root, "completed")
+	oid := f.branch("completed", path)
+	f.run(f.dir, "config", "branch.completed.remote", "origin")
+	f.run(f.dir, "config", "branch.completed.merge", "refs/heads/completed")
+	f.pullRequests("CLOSED", map[string]string{"completed": oid})
+	f.write(filepath.Join(f.dir, "tracked"), "remote update\n")
+	f.run(f.dir, "commit", "-am", "remote update")
+	updated := f.run(f.dir, "rev-parse", "HEAD")
+	f.run(f.dir, "push", "origin", "main")
+	f.run(f.dir, "reset", "--hard", old)
+	first := cleanFixture(t, f, false)
+	if first.WorktreesRemoved != 1 || first.BranchesDeleted != 1 || f.run(f.dir, "rev-parse", "HEAD") != updated {
+		t.Fatalf("fixture did not update and clean: %+v", first)
+	}
+	// Any GitHub lookup would fail; the completed state must hit immediately.
+	f.write(f.prs, "invalid JSON")
+	second := cleanFixture(t, f, false)
+	if !second.Unchanged {
+		t.Fatal("own update/removal forced an unnecessary full pass")
+	}
+}
+
+func TestLocalMarkerDoesNotStampConcurrentWork(t *testing.T) {
+	for _, mutation := range []string{"branch", "worktree", "file"} {
+		t.Run(mutation, func(t *testing.T) {
+			f := newCleanupFixture(t)
+			retained := filepath.Join(f.root, "retained")
+			oid := f.branch("retained", retained)
+			f.pullRequests("OPEN", map[string]string{"retained": oid})
+			t.Setenv("TEST_MUTATION", mutation)
+			t.Setenv("TEST_REPO", f.dir)
+			t.Setenv("TEST_MUTATED", filepath.Join(f.root, "mutated"))
+			t.Setenv("TEST_NEW_WORKTREE", filepath.Join(f.root, "unseen"))
+			t.Setenv("TEST_EDIT_PATH", filepath.Join(retained, "ignored"))
+			f.write(filepath.Join(f.root, "bin", "gh"), `#!/bin/sh
+if [ ! -e "$TEST_MUTATED" ]; then
+  touch "$TEST_MUTATED"
+  case "$TEST_MUTATION" in
+    branch) "$TEST_REAL_GIT" -C "$TEST_REPO" branch unseen ;;
+    worktree) "$TEST_REAL_GIT" -C "$TEST_REPO" worktree add -b unseen "$TEST_NEW_WORKTREE" >/dev/null ;;
+    file) printf 'concurrent local work\n' > "$TEST_EDIT_PATH" ;;
+  esac
+fi
+if [ "$1" = api ]; then
+  printf '%s\n' '{"data":{"repository":{"object":null,"pullRequest":null}}}'
+else
+  cat "$TEST_PRS"
+fi
+`)
+			cleanFixture(t, f, false)
+			marker, err := runMarkerPath(f.repo)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := os.Stat(marker); !os.IsNotExist(err) {
+				t.Fatalf("concurrent %s was stamped as processed: %v", mutation, err)
+			}
+			if next := cleanFixture(t, f, false); next.Unchanged {
+				t.Fatal("concurrent local work did not get a fresh pass")
+			}
+			if stable := cleanFixture(t, f, false); !stable.Unchanged {
+				t.Fatal("stable follow-up did not hit marker")
+			}
+		})
+	}
 }
 
 func TestUnwritableMarkerStopsForcedCleanup(t *testing.T) {

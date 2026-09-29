@@ -20,6 +20,7 @@ type repoResult struct {
 	Unchanged                                                            bool
 	Archives                                                             []string
 	Errors                                                               []string
+	cacheFingerprint                                                     string
 }
 
 func (r *repoResult) addErr(msg string, err error) {
@@ -37,7 +38,7 @@ func clean(ctx context.Context, r repository, opts options) (result repoResult, 
 	result = repoResult{Name: filepath.Base(r.Dir), DryRun: opts.DryRun}
 	var fingerprint string
 	var scanErr error
-	if !opts.DryRun {
+	if !opts.DryRun && !opts.Force {
 		fingerprint, scanErr = localFingerprint(ctx, r, opts)
 	}
 	if err := ctx.Err(); err != nil {
@@ -63,8 +64,8 @@ func clean(ctx context.Context, r repository, opts options) (result repoResult, 
 		}
 	}
 	result, returnedErr = cleanRepository(ctx, r, opts)
-	if returnedErr == nil && len(result.Errors) == 0 && !opts.DryRun && scanErr == nil && ctx.Err() == nil {
-		if err := writeRunMarker(r, fingerprint); err != nil {
+	if returnedErr == nil && len(result.Errors) == 0 && !opts.DryRun && result.cacheFingerprint != "" && ctx.Err() == nil {
+		if err := writeRunMarker(r, result.cacheFingerprint); err != nil {
 			uiWarn("Unable to save local marker: " + err.Error())
 		}
 	}
@@ -151,14 +152,29 @@ func cleanRepository(ctx context.Context, r repository, opts options) (result re
 			return fail("pruning worktrees", err)
 		}
 	}
-	branches, err := r.branches(ctx)
-	if err != nil {
-		return fail("listing branches", err)
+	var baseline *localState
+	if !opts.DryRun {
+		baseline, err = localSnapshot(ctx, r, opts)
+		if err != nil {
+			uiWarn("Unable to record local state for this run: " + err.Error())
+		}
 	}
-	worktrees, err := r.worktrees(ctx)
-	if err != nil {
-		return fail("listing worktrees", err)
+	var branches []Branch
+	var worktrees []Worktree
+	if baseline != nil {
+		branches, worktrees = baseline.Branches, baseline.Worktrees
+	} else {
+		branches, err = r.branches(ctx)
+		if err != nil {
+			return fail("listing branches", err)
+		}
+		worktrees, err = r.worktrees(ctx)
+		if err != nil {
+			return fail("listing worktrees", err)
+		}
 	}
+	var removedBranches []Branch
+	var removedWorktrees []Worktree
 	activeOperation, err := r.worktreeOperation(ctx, worktrees)
 	if err != nil {
 		return fail("checking linked worktree operations", err)
@@ -411,6 +427,7 @@ func cleanRepository(ctx context.Context, r repository, opts options) (result re
 		}
 		uiAction("REMOVED", "worktree")
 		result.WorktreesRemoved++
+		removedWorktrees = append(removedWorktrees, wt)
 		if hasBranch {
 			handled[b.Name] = true
 			deleted, err := r.deleteBranch(ctx, b)
@@ -420,6 +437,7 @@ func cleanRepository(ctx context.Context, r repository, opts options) (result re
 			if deleted {
 				uiAction("DELETED", "branch "+b.Name)
 				result.BranchesDeleted++
+				removedBranches = append(removedBranches, b)
 			} else {
 				result.BranchesSkipped++
 			}
@@ -520,12 +538,24 @@ func cleanRepository(ctx context.Context, r repository, opts options) (result re
 		if deleted {
 			uiAction("DELETED", "branch "+b.Name)
 			result.BranchesDeleted++
+			removedBranches = append(removedBranches, b)
 		} else {
 			result.BranchesSkipped++
 		}
 	}
 	if err := ctx.Err(); err != nil {
 		return result, err
+	}
+	if baseline != nil && len(result.Errors) == 0 {
+		expected, valid := baseline.AfterCleanup(removedBranches, removedWorktrees)
+		if valid {
+			outcome, scanErr := localSnapshot(ctx, r, opts)
+			if scanErr != nil {
+				uiWarn("Unable to verify local state after cleanup: " + scanErr.Error())
+			} else if outcome.Fingerprint() == expected {
+				result.cacheFingerprint = expected
+			}
+		}
 	}
 	return result, nil
 }
