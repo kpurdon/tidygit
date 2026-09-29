@@ -60,13 +60,20 @@ func uiBrand()         { uiPrint("\n" + sectionStyle.Render("  git tidy") + dimS
 func uiProgress(current, total int, name string) {
 	uiSection(fmt.Sprintf("[%d/%d] %s", current, total, name))
 }
-func uiSection(s string) { uiPrint("\n" + sectionStyle.Render("  "+displayText(s))) }
-func uiOK(s string)      { uiPrint("  " + okStyle.Render("✓") + " " + displayText(s)) }
-func uiWarn(s string)    { uiPrint("  " + warnStyle.Render("!") + " " + displayText(s)) }
-func uiItem(s string)    { uiPrint("\n  ▸ " + displayText(s)) }
-func uiDim(s string)     { uiPrint("    " + dimStyle.Render(displayText(s))) }
-func uiKeep(reason string) {
-	uiPrint("    " + warnStyle.Bold(true).Render("↳ KEPT") + " · " + displayText(reason))
+func uiSection(s string)   { uiPrint("\n" + sectionStyle.Render("  "+displayText(s))) }
+func uiWarn(s string)      { uiPrint("  " + warnStyle.Render("!") + " " + displayText(s)) }
+func uiItem(s string)      { uiPrint("\n  ▸ " + displayText(s)) }
+func uiDim(s string)       { uiPrint("    " + dimStyle.Render(displayText(s))) }
+func uiKeep(reason string) { uiAction("KEPT", reason) }
+func uiAction(action, detail string) {
+	style := okStyle
+	switch action {
+	case "KEPT":
+		style = warnStyle
+	case "ARCHIVED", "UNCHANGED", "WOULD ARCHIVE", "WOULD REMOVE", "WOULD DELETE":
+		style = sectionStyle
+	}
+	uiPrint("    " + style.Bold(true).Render("↳ "+action) + " · " + displayText(detail))
 }
 func uiErr(s string) {
 	prefix := "  ✗ "
@@ -148,9 +155,6 @@ func uiSummary(results []repoResult) {
 		uiPrint(fmt.Sprintf("  %s · %s · %s", sectionStyle.Render(displayText(r.Name)), style.Render(status), r.Duration.Round(time.Millisecond)))
 		if !r.Unchanged {
 			uiDim(summaryCounts(r))
-		}
-		for _, path := range r.Archives {
-			uiDim("Archive: " + path)
 		}
 		if len(r.Errors) > 0 && !r.Canceled {
 			failed++

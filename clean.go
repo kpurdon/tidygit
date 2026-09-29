@@ -52,7 +52,7 @@ func clean(ctx context.Context, r repository, opts options) (result repoResult, 
 		}
 		if unchanged {
 			result.Unchanged = true
-			uiDim("UNCHANGED · skipping cleanup (use --force to recheck GitHub)")
+			uiAction("UNCHANGED", "skipping cleanup (use --force to recheck GitHub)")
 			return result, nil
 		}
 	}
@@ -101,7 +101,7 @@ func cleanRepository(ctx context.Context, r repository, opts options) (result re
 		if err != nil {
 			return fail("fetching", err)
 		}
-		uiOK("Fetched (pruned remotes)")
+		uiAction("FETCHED", "remote refs pruned")
 		status, err := r.status(ctx, r.Dir, false)
 		if err != nil {
 			return fail("checking changes", err)
@@ -125,7 +125,7 @@ func cleanRepository(ctx context.Context, r repository, opts options) (result re
 				if _, err = r.git(ctx, "switch", "--no-overwrite-ignore", defaultBranch); err != nil {
 					return fail("switching to default branch", err)
 				}
-				uiOK("Switched to " + defaultBranch)
+				uiAction("SWITCHED", defaultBranch)
 				args := []string{"merge", "--ff-only", "--no-overwrite-ignore", "refs/remotes/origin/" + defaultBranch}
 				update := true
 				if opts.Rebase {
@@ -143,7 +143,7 @@ func cleanRepository(ctx context.Context, r repository, opts options) (result re
 					if _, err = r.git(ctx, args...); err != nil {
 						return fail("updating default branch", err)
 					}
-					uiOK("Updated " + defaultBranch)
+					uiAction("UPDATED", defaultBranch)
 				}
 			}
 		}
@@ -284,12 +284,12 @@ func cleanRepository(ctx context.Context, r repository, opts options) (result re
 		}
 		if opts.DryRun {
 			if len(ignored) > 0 {
-				uiDim("Would archive ignored files outside the worktree before removal")
+				uiAction("WOULD ARCHIVE", "ignored files outside the worktree")
 			}
-			uiOK("Would remove worktree " + wt.Path)
+			uiAction("WOULD REMOVE", "worktree "+wt.Path)
 			result.WorktreesPlanned++
 			if hasBranch {
-				uiOK("Would delete branch " + b.Name + " at " + b.OID)
+				uiAction("WOULD DELETE", "branch "+b.Name+" at "+shortOID(b.OID))
 				result.BranchesPlanned++
 				handled[b.Name] = true
 			}
@@ -325,7 +325,7 @@ func cleanRepository(ctx context.Context, r repository, opts options) (result re
 				continue
 			}
 			if archivePath != "" {
-				uiOK("Archived ignored files to " + archivePath)
+				uiAction("ARCHIVED", "ignored files → "+archivePath)
 			}
 		}
 		if err := r.removeWorktree(ctx, wt, b, hasBranch); err != nil {
@@ -334,7 +334,7 @@ func cleanRepository(ctx context.Context, r repository, opts options) (result re
 			keepBranch(wt.Branch)
 			continue
 		}
-		uiOK("Removed worktree")
+		uiAction("REMOVED", "worktree")
 		result.WorktreesRemoved++
 		if hasBranch {
 			handled[b.Name] = true
@@ -343,7 +343,7 @@ func cleanRepository(ctx context.Context, r repository, opts options) (result re
 				result.addErr("deleting branch "+b.Name, err)
 			}
 			if deleted {
-				uiOK("Deleted branch " + b.Name)
+				uiAction("DELETED", "branch "+b.Name)
 				result.BranchesDeleted++
 			} else {
 				result.BranchesSkipped++
@@ -387,7 +387,7 @@ func cleanRepository(ctx context.Context, r repository, opts options) (result re
 			uiLocalCommits(ctx, r, defaultBranch, b)
 		}
 		if opts.DryRun {
-			uiOK("Would delete branch " + b.Name + " at " + b.OID)
+			uiAction("WOULD DELETE", "branch "+b.Name+" at "+shortOID(b.OID))
 			result.BranchesPlanned++
 			continue
 		}
@@ -405,7 +405,7 @@ func cleanRepository(ctx context.Context, r repository, opts options) (result re
 			result.addErr("deleting branch "+b.Name, err)
 		}
 		if deleted {
-			uiOK("Deleted branch " + b.Name)
+			uiAction("DELETED", "branch "+b.Name)
 			result.BranchesDeleted++
 		} else {
 			result.BranchesSkipped++
