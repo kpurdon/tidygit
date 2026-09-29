@@ -130,3 +130,90 @@ func TestDeleteBranchPreservesDetachedRebaseWork(t *testing.T) {
 		t.Fatalf("rebase state missing: %v", err)
 	}
 }
+
+func TestInProgressReadsFreshMetadataWithoutGit(t *testing.T) {
+	for _, layout := range []string{"directory", "absolute file", "relative file", "symlink directory", "symlink file", "symlink parent"} {
+		t.Run(layout, func(t *testing.T) {
+			t.Setenv("PATH", t.TempDir())
+			t.Setenv("GIT_DIR", "")
+			t.Setenv("GIT_WORK_TREE", "")
+			root := t.TempDir()
+			worktree := filepath.Join(root, "worktree")
+			if err := os.Mkdir(worktree, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			metadata := filepath.Join(root, "metadata\nwith spaces ")
+			if layout == "directory" {
+				metadata = filepath.Join(worktree, ".git")
+			}
+			if err := os.Mkdir(metadata, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			dotgit := filepath.Join(worktree, ".git")
+			switch layout {
+			case "absolute file", "relative file", "symlink file", "symlink parent":
+				target := metadata
+				if layout != "absolute file" {
+					var err error
+					target, err = filepath.Rel(worktree, metadata)
+					if err != nil {
+						t.Fatal(err)
+					}
+				}
+				if layout == "symlink parent" {
+					child := filepath.Join(metadata, "child")
+					if err := os.Mkdir(child, 0o700); err != nil {
+						t.Fatal(err)
+					}
+					if err := os.Symlink(child, filepath.Join(worktree, "link")); err != nil {
+						t.Fatal(err)
+					}
+					target = "link/.."
+				}
+				file := dotgit
+				if layout == "symlink file" {
+					file = filepath.Join(root, "gitfile")
+				}
+				if err := os.WriteFile(file, []byte("gitdir: "+target+"\n"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				if file != dotgit {
+					if err := os.Symlink(file, dotgit); err != nil {
+						t.Fatal(err)
+					}
+				}
+			case "symlink directory":
+				if err := os.Symlink(metadata, dotgit); err != nil {
+					t.Fatal(err)
+				}
+			}
+			r := repository{Dir: worktree}
+			check := func(want string) {
+				t.Helper()
+				if got, err := r.inProgress(t.Context()); err != nil || got != want {
+					t.Fatalf("operation state = %q, %v; want %q", got, err, want)
+				}
+			}
+			check("")
+			marker := filepath.Join(metadata, "rebase-merge")
+			if err := os.Mkdir(marker, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			check("rebase-merge")
+			if err := os.Remove(marker); err != nil {
+				t.Fatal(err)
+			}
+			check("")
+		})
+	}
+}
+
+func TestInProgressRejectsMissingGitdir(t *testing.T) {
+	r := repository{Dir: t.TempDir()}
+	if err := os.WriteFile(filepath.Join(r.Dir, ".git"), []byte("gitdir: missing\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if state, err := r.inProgress(t.Context()); err == nil {
+		t.Fatalf("missing metadata accepted as safe: %q", state)
+	}
+}

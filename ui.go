@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -33,13 +34,29 @@ func displayText(s string) string {
 	}
 	return s
 }
-func uiPrint(s string) {
-	if !outputTerminal() || os.Getenv("NO_COLOR") != "" {
+func colorOutput() bool {
+	_, disabled := os.LookupEnv("NO_COLOR")
+	return outputTerminal() && !disabled
+}
+func terminalWidth() int {
+	if outputTerminal() {
+		if width, _, err := term.GetSize(os.Stdout.Fd()); err == nil {
+			return width
+		}
+	}
+	return 0
+}
+func formatOutput(s string, width int, color bool) string {
+	if !color {
 		s = ansi.Strip(s)
 	}
-	fmt.Fprintln(os.Stdout, s)
+	if width > 0 {
+		s = ansi.Wrap(s, width, "")
+	}
+	return s
 }
-func uiBrand() { uiPrint("\n" + sectionStyle.Render("  git tidy") + dimStyle.Render(" by kp")) }
+func uiPrint(s string) { fmt.Fprintln(os.Stdout, formatOutput(s, terminalWidth(), colorOutput())) }
+func uiBrand()         { uiPrint("\n" + sectionStyle.Render("  git tidy") + dimStyle.Render(" by kp")) }
 func uiProgress(current, total int, name string) {
 	uiPrint(fmt.Sprintf("  [%d/%d] %s", current, total, displayText(name)))
 }
@@ -51,33 +68,106 @@ func uiDim(s string)       { uiPrint("    " + dimStyle.Render(displayText(s))) }
 func uiKeep(reason string) { uiDim("Kept: " + reason) }
 func uiErr(s string) {
 	prefix := "  ✗ "
-	if term.IsTerminal(os.Stderr.Fd()) && os.Getenv("NO_COLOR") == "" {
+	_, disabled := os.LookupEnv("NO_COLOR")
+	if term.IsTerminal(os.Stderr.Fd()) && os.Getenv("TERM") != "dumb" && !disabled {
 		prefix = "  " + errStyle.Render("✗") + " "
 	}
-	fmt.Fprintln(os.Stderr, prefix+displayText(s))
-}
-func uiPR(pr PR) {
-	uiDim(fmt.Sprintf("PR #%d · %s · %s", pr.Number, strings.ToLower(pr.State), pr.Title))
-	uiDim(pr.URL)
-}
-func uiClearScreen() {
-	if outputTerminal() {
-		fmt.Print("\033[2J\033[H")
+	for line := range strings.SplitSeq(strings.TrimSpace(s), "\n") {
+		fmt.Fprintln(os.Stderr, prefix+displayText(line))
+		prefix = "    "
 	}
 }
-func uiDone() { uiOK("Done"); uiPrint("") }
+func shortOID(oid string) string { return oid[:min(len(oid), 12)] }
+func uiBranch(b Branch)          { uiItem(b.Name + " · " + shortOID(b.OID)) }
+func uiWorktree(base string, wt Worktree) {
+	path := wt.Path
+	if relative, err := filepath.Rel(base, path); err == nil {
+		path = relative
+	}
+	branch := wt.Branch
+	if branch == "" {
+		branch = "detached HEAD"
+	}
+	uiItem(path + " · " + branch + " · " + shortOID(wt.OID))
+}
+func uiPR(pr PR) {
+	state := strings.ToLower(pr.State)
+	style := dimStyle
+	switch state {
+	case "merged":
+		style = okStyle
+	case "open":
+		style = warnStyle
+	case "closed":
+		style = errStyle
+	}
+	uiPrint("    " + style.Render(displayText(state)) + dimStyle.Render(fmt.Sprintf(" · PR #%d · %s", pr.Number, displayText(pr.Title))))
+	if pr.URL != "" {
+		uiDim(pr.URL)
+	}
+}
+func summaryCounts(r repoResult) string {
+	if r.DryRun {
+		return fmt.Sprintf("worktrees %d planned / %d kept · branches %d planned / %d kept", r.WorktreesPlanned, r.WorktreesSkipped, r.BranchesPlanned, r.BranchesSkipped)
+	}
+	return fmt.Sprintf("worktrees %d removed / %d kept · branches %d deleted / %d kept", r.WorktreesRemoved, r.WorktreesSkipped, r.BranchesDeleted, r.BranchesSkipped)
+}
+func summaryStatus(r repoResult) string {
+	status := "done"
+	if r.DryRun {
+		status = "dry run"
+	}
+	if len(r.Errors) > 0 {
+		status = "failed"
+	}
+	if r.Canceled {
+		status = "canceled"
+	}
+	return status
+}
 func uiSummary(results []repoResult) {
 	uiSection("Summary")
+	var total repoResult
+	var failed, canceled int
 	for _, r := range results {
-		uiItem(r.Name)
-		uiDim(fmt.Sprintf("Worktrees: %d removed · %d kept · %d planned", r.WorktreesRemoved, r.WorktreesSkipped, r.WorktreesPlanned))
-		uiDim(fmt.Sprintf("Branches: %d deleted · %d kept · %d planned", r.BranchesDeleted, r.BranchesSkipped, r.BranchesPlanned))
-		if len(r.Errors) > 0 {
-			uiDim(fmt.Sprintf("%d error(s)", len(r.Errors)))
-			for _, err := range r.Errors {
-				uiDim(err)
+		status := summaryStatus(r)
+		style := okStyle
+		switch status {
+		case "failed":
+			style = errStyle
+		case "canceled":
+			style = warnStyle
+		case "dry run":
+			style = dimStyle
+		}
+		uiPrint(fmt.Sprintf("  %s · %s · %s", sectionStyle.Render(displayText(r.Name)), style.Render(status), r.Duration.Round(time.Millisecond)))
+		uiDim(summaryCounts(r))
+		if len(r.Errors) > 0 && !r.Canceled {
+			failed++
+		}
+		if r.Canceled {
+			canceled++
+		}
+		for _, err := range r.Errors {
+			for line := range strings.SplitSeq(strings.TrimSpace(err), "\n") {
+				uiDim(line)
 			}
 		}
+		total.WorktreesRemoved += r.WorktreesRemoved
+		total.WorktreesSkipped += r.WorktreesSkipped
+		total.WorktreesPlanned += r.WorktreesPlanned
+		total.BranchesDeleted += r.BranchesDeleted
+		total.BranchesSkipped += r.BranchesSkipped
+		total.BranchesPlanned += r.BranchesPlanned
+		total.Duration += r.Duration
+		total.DryRun = total.DryRun || r.DryRun
+	}
+	if len(results) > 1 {
+		uiPrint(fmt.Sprintf("\n  Total · %d repositories · %s cleanup time", len(results), total.Duration.Round(time.Millisecond)))
+		uiDim(summaryCounts(total))
+	}
+	if failed > 0 || canceled > 0 {
+		uiDim(fmt.Sprintf("%d failed · %d canceled · partial progress shown above", failed, canceled))
 	}
 }
 func uiSpinner(text string) func() {

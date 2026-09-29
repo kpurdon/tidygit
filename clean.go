@@ -4,9 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 type repoResult struct {
@@ -15,6 +15,8 @@ type repoResult struct {
 	BranchesTotal, BranchesDeleted, BranchesSkipped, BranchesPlanned     int
 	PRsFound                                                             int
 	DryRun                                                               bool
+	Duration                                                             time.Duration
+	Canceled                                                             bool
 	Errors                                                               []string
 }
 
@@ -28,8 +30,13 @@ func mergedBranch(pr PR, b Branch) bool {
 	return pr.State == "MERGED" && pr.HeadOID != "" && pr.HeadOID == b.OID && b.SourceRepo != "" && pr.HeadRepo == b.SourceRepo && pr.Branch == b.SourceBranch
 }
 
-func clean(ctx context.Context, r repository, opts options) (repoResult, error) {
-	result := repoResult{Name: filepath.Base(r.Dir), DryRun: opts.DryRun}
+func clean(ctx context.Context, r repository, opts options) (result repoResult, returnedErr error) {
+	started := time.Now()
+	defer func() {
+		result.Duration = time.Since(started)
+		result.Canceled = errors.Is(returnedErr, context.Canceled) || errors.Is(returnedErr, ErrUserAborted)
+	}()
+	result = repoResult{Name: filepath.Base(r.Dir), DryRun: opts.DryRun}
 	fail := func(msg string, err error) (repoResult, error) { result.addErr(msg, err); return result, ctx.Err() }
 	if err := ctx.Err(); err != nil {
 		return result, err
@@ -39,12 +46,15 @@ func clean(ctx context.Context, r repository, opts options) (repoResult, error) 
 	} else if state != "" {
 		return fail("checking repository state", fmt.Errorf("%s in progress; finish or abort it before cleanup", state))
 	}
+	uiSection(result.Name)
+	detecting := uiSpinner("Detecting default branch")
 	defaultBranch, err := r.defaultBranch(ctx)
+	detecting()
 	if err != nil {
 		return fail("detecting default branch", err)
 	}
 	result.DefaultBranch = defaultBranch
-	uiSection(fmt.Sprintf("%s (%s)", result.Name, defaultBranch))
+	uiDim("Default branch: " + defaultBranch)
 	if opts.DryRun {
 		uiWarn("Dry run: repositories will not be changed")
 	}
@@ -170,7 +180,7 @@ func clean(ctx context.Context, r repository, opts options) (repoResult, error) 
 		if err := ctx.Err(); err != nil {
 			return result, err
 		}
-		uiItem(fmt.Sprintf("%s (branch: %s, HEAD: %s)", wt.Path, wt.Branch, wt.OID))
+		uiWorktree(r.Dir, wt)
 		if pr, ok := prs[wt.Branch]; ok {
 			uiPR(pr)
 		}
@@ -184,6 +194,17 @@ func clean(ctx context.Context, r repository, opts options) (repoResult, error) 
 			reason = "locked worktree"
 		case wt.Prunable:
 			reason = "unavailable worktree"
+		}
+		b, hasBranch := branchByName[wt.Branch]
+		if reason == "" && hasBranch && activeOperation != "" {
+			reason = activeOperation
+		}
+		if reason == "" && (opts.Auto || opts.DryRun) {
+			if !hasBranch {
+				reason = "detached worktree has no branch to verify"
+			} else {
+				reason = mergedKeepReason(prs[wt.Branch], b)
+			}
 		}
 		if reason == "" {
 			status, err := r.status(ctx, wt.Path, true)
@@ -204,24 +225,17 @@ func clean(ctx context.Context, r repository, opts options) (repoResult, error) 
 				reason = state + " in progress"
 			}
 		}
-		b, hasBranch := branchByName[wt.Branch]
-		if reason == "" && hasBranch && activeOperation != "" {
-			reason = activeOperation
-		}
-		if reason == "" && (opts.Auto || opts.DryRun) && (!hasBranch || !mergedBranch(prs[wt.Branch], b)) {
-			reason = "no merged PR matching this repository and commit"
-		}
 		if reason != "" {
 			uiKeep(reason)
 			result.WorktreesSkipped++
 			keepBranch(wt.Branch)
 			continue
 		}
-		if hasBranch {
+		if hasBranch && !opts.Auto && !opts.DryRun {
 			uiLocalCommits(ctx, r, defaultBranch, b)
 		}
 		if opts.DryRun {
-			uiOK("Would remove worktree " + displayText(wt.Path))
+			uiOK("Would remove worktree " + wt.Path)
 			result.WorktreesPlanned++
 			if hasBranch {
 				uiOK("Would delete branch " + b.Name + " at " + b.OID)
@@ -281,7 +295,7 @@ func clean(ctx context.Context, r repository, opts options) (repoResult, error) 
 		if err := ctx.Err(); err != nil {
 			return result, err
 		}
-		uiItem(b.Name + " (HEAD: " + b.OID + ")")
+		uiBranch(b)
 		pr, hasPR := prs[b.Name]
 		if hasPR {
 			uiPR(pr)
@@ -291,15 +305,17 @@ func clean(ctx context.Context, r repository, opts options) (repoResult, error) 
 			reason = "checked out in a retained worktree"
 		} else if activeOperation != "" {
 			reason = activeOperation
-		} else if (opts.Auto || opts.DryRun) && !mergedBranch(pr, b) {
-			reason = "no merged PR matching this repository and commit"
+		} else if opts.Auto || opts.DryRun {
+			reason = mergedKeepReason(pr, b)
 		}
 		if reason != "" {
 			uiKeep(reason)
 			result.BranchesSkipped++
 			continue
 		}
-		uiLocalCommits(ctx, r, defaultBranch, b)
+		if !opts.Auto && !opts.DryRun {
+			uiLocalCommits(ctx, r, defaultBranch, b)
+		}
 		if opts.DryRun {
 			uiOK("Would delete branch " + b.Name + " at " + b.OID)
 			result.BranchesPlanned++
@@ -328,9 +344,6 @@ func clean(ctx context.Context, r repository, opts options) (repoResult, error) 
 	if err := ctx.Err(); err != nil {
 		return result, err
 	}
-	if len(result.Errors) == 0 {
-		uiDone()
-	}
 	return result, nil
 }
 
@@ -351,21 +364,6 @@ func uiLocalCommits(ctx context.Context, r repository, base string, b Branch) {
 			uiDim(displayText(line))
 		}
 	}
-}
-func (r repository) inProgress(ctx context.Context) (string, error) {
-	out, err := r.git(ctx, "rev-parse", "--absolute-git-dir")
-	if err != nil {
-		return "", err
-	}
-	dir := strings.TrimSuffix(out, "\n")
-	for _, name := range []string{"rebase-merge", "rebase-apply", "MERGE_HEAD", "CHERRY_PICK_HEAD", "REVERT_HEAD", "sequencer", "BISECT_START"} {
-		if _, err := os.Stat(filepath.Join(dir, name)); err == nil {
-			return name, nil
-		} else if !errors.Is(err, os.ErrNotExist) {
-			return "", err
-		}
-	}
-	return "", nil
 }
 func (r repository) removeWorktree(ctx context.Context, wt Worktree, b Branch, hasBranch bool) error {
 	fresh, err := r.worktrees(ctx)
@@ -406,4 +404,28 @@ func (r repository) removeWorktree(ctx context.Context, wt Worktree, b Branch, h
 	}
 	_, err = r.git(ctx, "worktree", "remove", "--", wt.Path)
 	return err
+}
+
+func mergedKeepReason(pr PR, b Branch) string {
+	if mergedBranch(pr, b) {
+		return ""
+	}
+	switch pr.State {
+	case "":
+		return "no matching pull request"
+	case "OPEN":
+		return "pull request is still open"
+	case "CLOSED":
+		return "pull request was closed without merging"
+	case "MERGED":
+		if b.SourceRepo == "" || pr.HeadRepo == "" || pr.HeadOID == "" {
+			return "merged PR repository or commit could not be verified"
+		}
+		if pr.HeadRepo != b.SourceRepo || pr.Branch != b.SourceBranch {
+			return "merged PR belongs to a different repository or branch"
+		}
+		return "local tip differs from the merged PR; keeping local work"
+	default:
+		return "pull request state could not be verified"
+	}
 }

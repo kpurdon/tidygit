@@ -179,9 +179,6 @@ func (r repository) checkBranch(ctx context.Context, b Branch) error {
 	return nil
 }
 func (r repository) deleteBranch(ctx context.Context, b Branch) (bool, error) {
-	if err := r.checkBranch(ctx, b); err != nil {
-		return false, err
-	}
 	worktrees, err := r.worktrees(ctx)
 	if err != nil {
 		return false, err
@@ -226,6 +223,69 @@ func (r repository) worktreeOperation(ctx context.Context, worktrees []Worktree)
 		}
 		if state != "" {
 			return fmt.Sprintf("%s in progress in %s", state, wt.Path), nil
+		}
+	}
+	return "", nil
+}
+
+func (r repository) gitDir(ctx context.Context) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+	// Explicit Git environment overrides and unusual layouts remain Git's responsibility.
+	if os.Getenv("GIT_DIR") == "" && os.Getenv("GIT_WORK_TREE") == "" {
+		path := filepath.Join(r.Dir, ".git")
+		info, err := os.Stat(path)
+		if err == nil {
+			if info.IsDir() {
+				return path, nil
+			}
+			if info.Mode().IsRegular() {
+				data, err := os.ReadFile(path)
+				if err != nil {
+					return "", err
+				}
+				if dir, ok := strings.CutPrefix(string(data), "gitdir: "); ok {
+					// Git removes line endings, but whitespace and embedded newlines belong to the path.
+					dir = strings.TrimRight(dir, "\r\n")
+					if dir == "" {
+						return "", fmt.Errorf("empty gitdir in %s", path)
+					}
+					if !filepath.IsAbs(dir) {
+						dir = r.Dir + string(filepath.Separator) + dir
+					}
+					dir, err = filepath.EvalSymlinks(dir)
+					if err != nil {
+						return "", err
+					}
+					info, err := os.Stat(dir)
+					if err != nil {
+						return "", err
+					}
+					if !info.IsDir() {
+						return "", fmt.Errorf("gitdir %s is not a directory", dir)
+					}
+					return dir, nil
+				}
+			}
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return "", err
+		}
+	}
+	out, err := r.git(ctx, "rev-parse", "--absolute-git-dir")
+	return strings.TrimSuffix(out, "\n"), err
+}
+
+func (r repository) inProgress(ctx context.Context) (string, error) {
+	dir, err := r.gitDir(ctx)
+	if err != nil {
+		return "", err
+	}
+	for _, name := range []string{"rebase-merge", "rebase-apply", "MERGE_HEAD", "CHERRY_PICK_HEAD", "REVERT_HEAD", "sequencer", "BISECT_START"} {
+		if _, err := os.Stat(filepath.Join(dir, name)); err == nil {
+			return name, nil
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return "", err
 		}
 	}
 	return "", nil

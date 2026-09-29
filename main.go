@@ -163,6 +163,7 @@ func run(ctx context.Context, args []string) error {
 	}
 	uiBrand()
 	result, err := clean(ctx, repo, opts)
+	uiSummary([]repoResult{result})
 	if err != nil {
 		return err
 	}
@@ -218,10 +219,12 @@ func cleanAll(ctx context.Context, dir string, opts options) error {
 	caller, _ := discoverRepo(ctx, ".", opts.Timeout)
 	var repos []repository
 	var failures []error
+	var results []repoResult
 	seen := map[string]int{}
 	for i, item := range found {
 		if item.err != nil {
 			failures = append(failures, fmt.Errorf("%s: %w", paths[i], item.err))
+			results = append(results, repoResult{Name: filepath.Base(paths[i]), DryRun: opts.DryRun, Errors: []string{item.err.Error()}})
 			continue
 		}
 		if caller.CommonDir == item.repo.CommonDir {
@@ -240,17 +243,17 @@ func cleanAll(ctx context.Context, dir string, opts options) error {
 		fmt.Println("No git repositories found.")
 		return nil
 	}
-	var results []repoResult
+	uiBrand()
 	for i, repo := range repos {
 		if err := ctx.Err(); err != nil {
+			uiSummary(results)
 			return err
 		}
-		uiClearScreen()
-		uiBrand()
 		uiProgress(i+1, len(repos), filepath.Base(repo.Dir))
 		result, err := clean(ctx, repo, opts)
 		results = append(results, result)
 		if err != nil {
+			uiSummary(results)
 			return err
 		}
 		if len(result.Errors) > 0 {
