@@ -42,7 +42,15 @@ func ignoredPaths(ctx context.Context, r repository, worktreePath string) ([]str
 		paths = append(paths, name)
 	}
 	slices.Sort(paths)
-	return slices.Compact(paths), nil
+	// Git can report an ignored directory together with descendants matched by
+	// nested ignore rules. Moving the directory already preserves those entries.
+	roots := paths[:0]
+	for _, name := range paths {
+		if archivePathOverlap(roots, name) == "" {
+			roots = append(roots, name)
+		}
+	}
+	return roots, nil
 }
 
 // archivePathOverlap checks a sorted inventory without rescanning every tracked file.

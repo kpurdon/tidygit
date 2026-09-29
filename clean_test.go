@@ -517,3 +517,45 @@ func TestUnwritableMarkerStopsForcedCleanup(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestArchiveNestedIgnoredDirectoriesAndPreservePrimaryEnv(t *testing.T) {
+	f := newCleanupFixture(t)
+	f.write(filepath.Join(f.dir, ".gitignore"), ".envrc\n**/charts/*.tgz\n")
+	f.run(f.dir, "commit", "-am", "ignore environment and chart artifacts")
+	f.run(f.dir, "push")
+	path := filepath.Join(f.root, "merged")
+	oid := f.branch("merged", path)
+	f.pullRequests("MERGED", map[string]string{"merged": oid})
+	f.write(filepath.Join(f.dir, ".envrc"), "primary environment\n")
+	contents := map[string]string{
+		".envrc":                                "linked environment\n",
+		"apps/demo/chart/charts/dependency.tgz": "chart bytes\n",
+		".ruff_cache/.gitignore":                "*\n",
+		".ruff_cache/nested/result":             "cache bytes\n",
+	}
+	for name, data := range contents {
+		target := filepath.Join(path, filepath.FromSlash(name))
+		if err := os.MkdirAll(filepath.Dir(target), 0700); err != nil {
+			t.Fatal(err)
+		}
+		f.write(target, data)
+	}
+	r := cleanFixture(t, f, false)
+	if r.WorktreesRemoved != 1 || r.BranchesDeleted != 1 || len(r.Archives) != 1 {
+		t.Fatalf("ignored directory prevented cleanup: %+v", r)
+	}
+	for name, want := range contents {
+		got, err := os.ReadFile(filepath.Join(r.Archives[0], "files", filepath.FromSlash(name)))
+		if err != nil || string(got) != want {
+			t.Fatalf("archive lost %q: %q %v", name, got, err)
+		}
+	}
+	got, err := os.ReadFile(filepath.Join(f.dir, ".envrc"))
+	if err != nil || string(got) != "primary environment\n" {
+		t.Fatalf("primary environment changed: %q %v", got, err)
+	}
+	f.assertBranch("merged", false)
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("worktree remains: %v", err)
+	}
+}
