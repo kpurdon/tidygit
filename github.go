@@ -132,7 +132,7 @@ func fetchPRs(ctx context.Context, command func(context.Context, string, ...stri
 			continue
 		}
 		pr, found := newestPR(batch, branch)
-		if !found || pr.State == "MERGED" {
+		if !found || pr.State == "MERGED" || pr.State == "CLOSED" {
 			if _, exists := targeted[branch.SourceBranch]; !exists {
 				targeted[branch.SourceBranch] = len(heads)
 				heads = append(heads, branch.SourceBranch)

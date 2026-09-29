@@ -32,7 +32,7 @@ const usage = `Usage: tidygit [options] [all [dir]]
 
 Tidy the current repository or immediate repositories in a directory.
 
-  --auto                  Remove only verified merged work; never prompt
+  --auto                  Clean up verified merged or closed PR work; never prompt
   --dry-run               Show proposed cleanup without changing repositories
   --pr-limit N            PR lookup limit (default 100)
   --exclude-pr-filtering  Include all authors in the initial PR lookup

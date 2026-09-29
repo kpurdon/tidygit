@@ -92,11 +92,11 @@ func (f *cleanupFixture) branch(name, path string) string {
 	}
 	return f.run(f.dir, "rev-parse", name)
 }
-func (f *cleanupFixture) merged(branches map[string]string) {
+func (f *cleanupFixture) pullRequests(state string, branches map[string]string) {
 	f.t.Helper()
 	var prs []map[string]any
 	for name, oid := range branches {
-		prs = append(prs, map[string]any{"number": 1, "headRefName": name, "headRefOid": oid, "state": "MERGED", "headRepository": map[string]string{"name": "repo"}, "headRepositoryOwner": map[string]string{"login": "audit"}})
+		prs = append(prs, map[string]any{"number": 1, "headRefName": name, "headRefOid": oid, "state": state, "headRepository": map[string]string{"name": "repo"}, "headRepositoryOwner": map[string]string{"login": "audit"}})
 	}
 	body, err := json.Marshal(prs)
 	if err != nil {
@@ -131,40 +131,44 @@ func cleanFixture(t *testing.T, f *cleanupFixture, dry bool) repoResult {
 }
 
 func TestAutoPreservesDirtyAndNewerWork(t *testing.T) {
-	f := newCleanupFixture(t)
-	prs := map[string]string{}
-	for _, kind := range []string{"tracked", "untracked", "ignored", "clean", "newer", "locked"} {
-		path := filepath.Join(f.root, kind)
-		prs[kind] = f.branch(kind, path)
-		switch kind {
-		case "tracked", "untracked", "ignored":
-			f.write(filepath.Join(path, kind), "keep me\n")
-		case "newer":
-			f.write(filepath.Join(path, "tracked"), "new commit\n")
-			f.run(path, "commit", "-am", "new local commit")
-		case "locked":
-			f.run(f.dir, "worktree", "lock", path)
-		}
-	}
-	f.merged(prs)
-	r := cleanFixture(t, f, false)
-	checkCounts(t, r, 6)
-	if r.BranchesDeleted != 1 || r.WorktreesRemoved != 1 {
-		t.Fatalf("unexpected deletions: %+v", r)
-	}
-	for name := range prs {
-		f.assertBranch(name, name != "clean")
-		if name != "clean" {
-			if _, err := os.Stat(filepath.Join(f.root, name)); err != nil {
-				t.Fatal(err)
+	for _, state := range []string{"MERGED", "CLOSED"} {
+		t.Run(state, func(t *testing.T) {
+			f := newCleanupFixture(t)
+			prs := map[string]string{}
+			for _, kind := range []string{"tracked", "untracked", "ignored", "clean", "newer", "locked"} {
+				path := filepath.Join(f.root, kind)
+				prs[kind] = f.branch(kind, path)
+				switch kind {
+				case "tracked", "untracked", "ignored":
+					f.write(filepath.Join(path, kind), "keep me\n")
+				case "newer":
+					f.write(filepath.Join(path, "tracked"), "new commit\n")
+					f.run(path, "commit", "-am", "new local commit")
+				case "locked":
+					f.run(f.dir, "worktree", "lock", path)
+				}
 			}
-		}
-	}
-	for _, kind := range []string{"tracked", "untracked", "ignored"} {
-		body, err := os.ReadFile(filepath.Join(f.root, kind, kind))
-		if err != nil || string(body) != "keep me\n" {
-			t.Fatalf("lost %s data: %q %v", kind, body, err)
-		}
+			f.pullRequests(state, prs)
+			r := cleanFixture(t, f, false)
+			checkCounts(t, r, 6)
+			if r.BranchesDeleted != 1 || r.WorktreesRemoved != 1 {
+				t.Fatalf("unexpected deletions: %+v", r)
+			}
+			for name := range prs {
+				f.assertBranch(name, name != "clean")
+				if name != "clean" {
+					if _, err := os.Stat(filepath.Join(f.root, name)); err != nil {
+						t.Fatal(err)
+					}
+				}
+			}
+			for _, kind := range []string{"tracked", "untracked", "ignored"} {
+				body, err := os.ReadFile(filepath.Join(f.root, kind, kind))
+				if err != nil || string(body) != "keep me\n" {
+					t.Fatalf("lost %s data: %q %v", kind, body, err)
+				}
+			}
+		})
 	}
 }
 
@@ -174,7 +178,7 @@ func TestCurrentAndMainWorktreesProtected(t *testing.T) {
 	oid := f.branch("current", path)
 	f.run(f.dir, "switch", "-c", "primary")
 	f.run(f.dir, "worktree", "add", filepath.Join(f.root, "default"), "main")
-	f.merged(map[string]string{"current": oid, "primary": oid, "main": oid})
+	f.pullRequests("MERGED", map[string]string{"current": oid, "primary": oid, "main": oid})
 	var err error
 	f.repo, err = discoverRepo(t.Context(), path, defaultOptions().Timeout)
 	if err != nil {
@@ -194,7 +198,7 @@ func TestDryRunDoesNotMutateRepository(t *testing.T) {
 	f := newCleanupFixture(t)
 	path := filepath.Join(f.root, "merged")
 	oid := f.branch("merged", path)
-	f.merged(map[string]string{"merged": oid})
+	f.pullRequests("MERGED", map[string]string{"merged": oid})
 	f.write(filepath.Join(f.dir, "tracked"), "staged\n")
 	f.run(f.dir, "add", "tracked")
 	snapshot := func() map[string]string {
@@ -238,7 +242,7 @@ func TestCleanupFailureStopsDeletionAndFailsAll(t *testing.T) {
 		t.Run(kind, func(t *testing.T) {
 			f := newCleanupFixture(t)
 			oid := f.branch("merged", "")
-			f.merged(map[string]string{"merged": oid})
+			f.pullRequests("MERGED", map[string]string{"merged": oid})
 			opts := defaultOptions()
 			opts.Auto = true
 			switch kind {
@@ -269,7 +273,7 @@ func TestAllPreservesCallerLinkedWorktree(t *testing.T) {
 	f := newCleanupFixture(t)
 	caller := filepath.Join(f.root, "caller")
 	oid := f.branch("caller", caller)
-	f.merged(map[string]string{"caller": oid})
+	f.pullRequests("MERGED", map[string]string{"caller": oid})
 	t.Chdir(caller)
 	opts := defaultOptions()
 	opts.Auto = true
@@ -296,7 +300,7 @@ func TestCleanWorktreeWithOperationInProgressIsPreserved(t *testing.T) {
 			f := newCleanupFixture(t)
 			path := filepath.Join(f.root, "cherry-picking")
 			oid := f.branch("cherry-picking", path)
-			f.merged(map[string]string{"cherry-picking": oid})
+			f.pullRequests("MERGED", map[string]string{"cherry-picking": oid})
 			state := f.run(path, "rev-parse", "--path-format=absolute", "--git-path", "CHERRY_PICK_HEAD")
 			f.write(state, oid+"\n")
 			if status := f.run(path, "status", "--porcelain"); status != "" {
@@ -349,6 +353,43 @@ func TestRemoteUpdatePreservesIgnoredLocalFile(t *testing.T) {
 			}
 			if got := f.run(f.dir, "rev-parse", "main"); got != original {
 				t.Fatalf("default branch advanced despite protected ignored file: %s", got)
+			}
+		})
+	}
+}
+
+func TestClosedPRCleanup(t *testing.T) {
+	for _, dry := range []bool{false, true} {
+		name := "auto"
+		if dry {
+			name = "dry-run"
+		}
+		t.Run(name, func(t *testing.T) {
+			f := newCleanupFixture(t)
+			path := filepath.Join(f.root, "closed-worktree")
+			f.branch("closed-worktree", path)
+			f.write(filepath.Join(path, "tracked"), "closed without merging\n")
+			f.run(path, "commit", "-am", "abandoned work")
+			oid := f.run(path, "rev-parse", "HEAD")
+			f.run(f.dir, "branch", "closed-branch", oid)
+			f.pullRequests("CLOSED", map[string]string{"closed-worktree": oid, "closed-branch": oid})
+			r := cleanFixture(t, f, dry)
+			checkCounts(t, r, 2)
+			if dry {
+				if r.BranchesPlanned != 2 || r.WorktreesPlanned != 1 || r.BranchesDeleted != 0 || r.WorktreesRemoved != 0 {
+					t.Fatalf("unexpected preview: %+v", r)
+				}
+			} else if r.BranchesDeleted != 2 || r.WorktreesRemoved != 1 {
+				t.Fatalf("closed work retained: %+v", r)
+			}
+			f.assertBranch("closed-worktree", dry)
+			f.assertBranch("closed-branch", dry)
+			_, err := os.Stat(path)
+			if dry && err != nil {
+				t.Fatal(err)
+			}
+			if !dry && !os.IsNotExist(err) {
+				t.Fatalf("worktree still exists: %v", err)
 			}
 		})
 	}

@@ -26,10 +26,6 @@ func (r *repoResult) addErr(msg string, err error) {
 	uiErr(text)
 }
 
-func mergedBranch(pr PR, b Branch) bool {
-	return pr.State == "MERGED" && pr.HeadOID != "" && pr.HeadOID == b.OID && b.SourceRepo != "" && pr.HeadRepo == b.SourceRepo && pr.Branch == b.SourceBranch
-}
-
 func clean(ctx context.Context, r repository, opts options) (result repoResult, returnedErr error) {
 	started := time.Now()
 	defer func() {
@@ -161,7 +157,7 @@ func clean(ctx context.Context, r repository, opts options) (result repoResult, 
 		if opts.Auto || !errors.Is(err, errGHUnavailable) {
 			return fail("fetching PRs", err)
 		}
-		uiWarn("GitHub CLI is unavailable; merged status cannot be verified")
+		uiWarn("GitHub CLI is unavailable; PR status cannot be verified")
 		prs = map[string]PR{}
 	}
 	result.PRsFound = len(prs)
@@ -203,7 +199,7 @@ func clean(ctx context.Context, r repository, opts options) (result repoResult, 
 			if !hasBranch {
 				reason = "detached worktree has no branch to verify"
 			} else {
-				reason = mergedKeepReason(prs[wt.Branch], b)
+				reason = cleanupKeepReason(prs[wt.Branch], b)
 			}
 		}
 		if reason == "" {
@@ -306,7 +302,7 @@ func clean(ctx context.Context, r repository, opts options) (result repoResult, 
 		} else if activeOperation != "" {
 			reason = activeOperation
 		} else if opts.Auto || opts.DryRun {
-			reason = mergedKeepReason(pr, b)
+			reason = cleanupKeepReason(pr, b)
 		}
 		if reason != "" {
 			uiKeep(reason)
@@ -406,25 +402,23 @@ func (r repository) removeWorktree(ctx context.Context, wt Worktree, b Branch, h
 	return err
 }
 
-func mergedKeepReason(pr PR, b Branch) string {
-	if mergedBranch(pr, b) {
-		return ""
-	}
+func cleanupKeepReason(pr PR, b Branch) string {
 	switch pr.State {
 	case "":
 		return "no matching pull request"
 	case "OPEN":
 		return "pull request is still open"
-	case "CLOSED":
-		return "pull request was closed without merging"
-	case "MERGED":
+	case "MERGED", "CLOSED":
 		if b.SourceRepo == "" || pr.HeadRepo == "" || pr.HeadOID == "" {
-			return "merged PR repository or commit could not be verified"
+			return "PR repository or commit could not be verified"
 		}
 		if pr.HeadRepo != b.SourceRepo || pr.Branch != b.SourceBranch {
-			return "merged PR belongs to a different repository or branch"
+			return "PR belongs to a different repository or branch"
 		}
-		return "local tip differs from the merged PR; keeping local work"
+		if pr.HeadOID != b.OID {
+			return "local tip differs from the PR; keeping local work"
+		}
+		return ""
 	default:
 		return "pull request state could not be verified"
 	}

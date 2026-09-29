@@ -26,6 +26,7 @@ func TestGitHubRepo(t *testing.T) {
 func TestFetchPRIdentityAndActiveHistory(t *testing.T) {
 	branch := Branch{Name: "local", SourceRepo: "github.com/me/repo", SourceBranch: "feature", OID: "abc"}
 	merged := `{"number":1,"headRefName":"feature","headRefOid":"abc","state":"MERGED","headRepository":{"name":"repo"},"headRepositoryOwner":{"login":"me"}}`
+	closed := strings.Replace(merged, "MERGED", "CLOSED", 1)
 	open := `{"number":2,"headRefName":"feature","headRefOid":"def","state":"OPEN","headRepository":{"name":"repo"},"headRepositoryOwner":{"login":"me"}}`
 	wrongFork := `{"number":3,"headRefName":"feature","headRefOid":"abc","state":"MERGED","headRepository":{"name":"repo"},"headRepositoryOwner":{"login":"other"}}`
 	for _, tc := range []struct {
@@ -33,6 +34,8 @@ func TestFetchPRIdentityAndActiveHistory(t *testing.T) {
 		want                  int
 	}{
 		{"active branch supersedes merged history", "[" + merged + "]", "[" + merged + "," + open + "]", 2},
+		{"active branch supersedes closed history", "[" + closed + "]", "[" + closed + "," + open + "]", 2},
+		{"closed PR is verified without author filtering", "[" + closed + "]", "[" + closed + "]", 1},
 		{"another fork cannot authorize deletion", "[" + wrongFork + "]", "[" + wrongFork + "]", 0},
 		{"missing source metadata cannot authorize deletion", `[{"number":4,"headRefName":"feature","state":"MERGED"}]`, `[{"number":4,"headRefName":"feature","state":"MERGED"}]`, 0},
 		{"targeted lookup recovers filtered PR", "[]", "[" + merged + "]", 1},

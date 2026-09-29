@@ -17,7 +17,7 @@ Or build from source with `go build -o tidygit .`. CI tests Linux and macOS with
 ```sh
 tidygit                         # Tidy the current repository
 tidygit all [dir]               # Tidy repositories in a directory
-tidygit --auto                  # Clean up verified merged PR branches/worktrees
+tidygit --auto                  # Clean up verified merged or closed PR branches/worktrees
 tidygit --auto all [dir]
 tidygit --dry-run               # Preview without changing repository state
 tidygit --rebase                # Opt in to rebasing the default branch
@@ -25,7 +25,7 @@ tidygit --help
 tidygit --version
 ```
 
-The default branch updates with a fast-forward-only merge after fetching. Interactive removal prompts default to **No**. Automatic removal requires a merged PR whose head repository and commit match the local branch. Open PRs and branches without verified merged PRs are preserved in automatic mode.
+The default branch updates with a fast-forward-only merge after fetching. Interactive removal prompts default to **No**. Automatic removal accepts merged PRs and PRs closed without merging, provided the PR head repository and commit match the local branch. Open PRs, newer local commits, and branches without a verified matching PR are preserved in automatic mode.
 
 Tracked changes, untracked files, and ignored files are never automatically discarded. Current, main, and locked worktrees are protected. Branch cleanup pauses while any worktree has an active Git operation such as a rebase or bisect. Clean up dirty worktrees manually before retrying. Rebasing is skipped when local files, including ignored files, are present. Without `gh`, interactive mode warns and continues without PR information; automatic mode fails when PR lookup is needed.
 
