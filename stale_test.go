@@ -12,6 +12,7 @@ func ageFixture(t *testing.T, f *cleanupFixture, when time.Time) {
 	t.Helper()
 	t.Setenv("GIT_COMMITTER_DATE", when.Format(time.RFC3339))
 	t.Setenv("GIT_AUTHOR_DATE", when.Format(time.RFC3339))
+	f.run(f.dir, "reflog", "expire", "--expire=all", "--all")
 	f.run(f.dir, "commit", "--amend", "--no-edit", "--date", when.Format(time.RFC3339))
 	if err := filepath.WalkDir(f.dir, func(path string, entry fs.DirEntry, err error) error {
 		if err != nil {
@@ -133,12 +134,14 @@ func TestStaleBranchProtectsNewRefAtOldCommit(t *testing.T) {
 	now := time.Now().Truncate(time.Second)
 	old := now.Add(-31 * 24 * time.Hour)
 	ageFixture(t, f, old)
+	t.Setenv("GIT_COMMITTER_DATE", now.Format(time.RFC3339))
 	f.run(f.dir, "branch", "snapshot")
 	branch := Branch{Name: "snapshot"}
 	stale, err := staleBranch(t.Context(), f.repo, branch, 30, now.Add(time.Second))
 	if err != nil || stale {
 		t.Fatalf("new branch at old commit: %v %v", stale, err)
 	}
+	f.run(f.dir, "reflog", "expire", "--expire=all", "refs/heads/snapshot")
 	for _, name := range []string{"refs/heads/snapshot", "logs/refs/heads/snapshot"} {
 		if err := os.Chtimes(filepath.Join(f.repo.CommonDir, filepath.FromSlash(name)), old, old); err != nil {
 			t.Fatal(err)
@@ -164,5 +167,95 @@ func TestStaleBranchProtectsNewRefAtOldCommit(t *testing.T) {
 	}
 	if before == after {
 		t.Fatal("branch age threshold did not invalidate marker")
+	}
+}
+
+func TestReflogEventsIgnoreMaintenanceFileTimes(t *testing.T) {
+	f := newCleanupFixture(t)
+	now := time.Now().Truncate(time.Second)
+	old := now.Add(-45 * 24 * time.Hour)
+	ageFixture(t, f, old)
+	f.run(f.dir, "branch", "snapshot")
+	for _, name := range []string{"logs/HEAD", "logs/refs/heads/snapshot"} {
+		if err := os.Chtimes(filepath.Join(f.repo.CommonDir, filepath.FromSlash(name)), now, now); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.Chtimes(filepath.Join(f.repo.CommonDir, "refs", "heads", "snapshot"), old, old); err != nil {
+		t.Fatal(err)
+	}
+	for name, check := range map[string]func() (bool, error){
+		"worktree": func() (bool, error) { return staleWorktree(t.Context(), f.repo, Worktree{Path: f.dir}, 14, now) },
+		"branch":   func() (bool, error) { return staleBranch(t.Context(), f.repo, Branch{Name: "snapshot"}, 14, now) },
+	} {
+		stale, err := check()
+		if err != nil || !stale {
+			t.Fatalf("%s maintenance refreshed age: %v %v", name, stale, err)
+		}
+	}
+	t.Setenv("GIT_COMMITTER_DATE", now.Format(time.RFC3339))
+	f.run(f.dir, "switch", "main")
+	f.run(f.dir, "branch", "recent-event")
+	for _, name := range []string{"HEAD", "logs/HEAD", "refs/heads/recent-event", "logs/refs/heads/recent-event"} {
+		if err := os.Chtimes(filepath.Join(f.repo.CommonDir, filepath.FromSlash(name)), old, old); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for name, check := range map[string]func() (bool, error){
+		"worktree": func() (bool, error) { return staleWorktree(t.Context(), f.repo, Worktree{Path: f.dir}, 14, now) },
+		"branch":   func() (bool, error) { return staleBranch(t.Context(), f.repo, Branch{Name: "recent-event"}, 14, now) },
+	} {
+		stale, err := check()
+		if err != nil || stale {
+			t.Fatalf("%s recent event lost: %v %v", name, stale, err)
+		}
+	}
+}
+
+func TestPackedBranchWithExpiredReflogRetainsUnknownAge(t *testing.T) {
+	f := newCleanupFixture(t)
+	now := time.Now().Truncate(time.Second)
+	old := now.Add(-45 * 24 * time.Hour)
+	ageFixture(t, f, old)
+	f.run(f.dir, "branch", "snapshot")
+	f.run(f.dir, "reflog", "expire", "--expire=all", "refs/heads/snapshot")
+	f.run(f.dir, "pack-refs", "--all", "--prune")
+	for _, name := range []string{"packed-refs", "logs/refs/heads/snapshot"} {
+		if err := os.Chtimes(filepath.Join(f.repo.CommonDir, filepath.FromSlash(name)), now, now); err != nil {
+			t.Fatal(err)
+		}
+	}
+	stale, err := staleBranch(t.Context(), f.repo, Branch{Name: "snapshot"}, 14, now)
+	if err != nil || stale {
+		t.Fatalf("packed branch with unknown creation age must remain: %v %v", stale, err)
+	}
+}
+
+func TestRecentLooseRefWithOldReflogEventIsProtected(t *testing.T) {
+	f := newCleanupFixture(t)
+	now := time.Now().Truncate(time.Second)
+	old := now.Add(-45 * 24 * time.Hour)
+	ageFixture(t, f, old)
+	// Backdated Git identity produces an old event, but the new loose ref is recent.
+	f.run(f.dir, "branch", "recent-ref")
+	stale, err := staleBranch(t.Context(), f.repo, Branch{Name: "recent-ref"}, 14, now.Add(time.Second))
+	if err != nil || stale {
+		t.Fatalf("recent ref update hidden by old event: %v %v", stale, err)
+	}
+}
+
+func TestNewPackedBranchWithoutReflogIsProtected(t *testing.T) {
+	f := newCleanupFixture(t)
+	now := time.Now().Truncate(time.Second)
+	ageFixture(t, f, now.Add(-90*24*time.Hour))
+	f.run(f.dir, "config", "core.logAllRefUpdates", "false")
+	f.run(f.dir, "branch", "new-no-log")
+	f.run(f.dir, "pack-refs", "--all", "--prune")
+	if _, err := os.Stat(filepath.Join(f.repo.CommonDir, "logs", "refs", "heads", "new-no-log")); !os.IsNotExist(err) {
+		t.Fatalf("expected no reflog: %v", err)
+	}
+	stale, err := staleBranch(t.Context(), f.repo, Branch{Name: "new-no-log"}, 14, now.Add(time.Second))
+	if err != nil || stale {
+		t.Fatalf("new packed branch considered stale: %v %v", stale, err)
 	}
 }

@@ -36,14 +36,14 @@ func TestParseArgs(t *testing.T) {
 			t.Errorf("accepted invalid arguments %v", args)
 		}
 	}
-	for _, days := range []string{"0", "7", "30"} {
+	for _, days := range []string{"0", "7", "14", "30"} {
 		opts, _, _, err := parseArgs([]string{"--stale-days", days})
 		if err != nil || fmt.Sprint(opts.StaleDays) != days {
 			t.Fatalf("stale threshold %q: %+v, %v", days, opts, err)
 		}
 	}
-	if defaultOptions().StaleDays != 30 {
-		t.Fatal("stale cleanup must default to 30 days")
+	if defaultOptions().StaleDays != 14 {
+		t.Fatal("stale cleanup must default to 14 days")
 	}
 }
 

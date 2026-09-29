@@ -26,7 +26,7 @@ type options struct {
 }
 
 func defaultOptions() options {
-	return options{PRLimit: 100, PRAuthor: "@me", Timeout: 30 * time.Second, Jobs: 4, StaleDays: 30}
+	return options{PRLimit: 100, PRAuthor: "@me", Timeout: 30 * time.Second, Jobs: 4, StaleDays: 14}
 }
 
 const usage = `Usage: tidygit [options] [all [dir]]
@@ -36,7 +36,7 @@ Tidy the current repository or immediate repositories in a directory.
   --auto                  Clean up completed or archived stale work; never prompt
   --dry-run               Show proposed cleanup without changing repositories
   --force                 Recheck unchanged repositories; keep all deletion safeguards
-  --stale-days N          Archive inactive work after N days (default 30; 0 disables)
+  --stale-days N           Archive inactive work after N days (default 14; 0 disables)
   --pr-limit N            PR lookup limit (default 100)
   --exclude-pr-filtering  Include all authors in the initial PR lookup
   --rebase                Rebase the default branch instead of fast-forward only

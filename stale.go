@@ -54,7 +54,14 @@ func worktreeLastActivity(ctx context.Context, r repository, wt Worktree) (time.
 	if err != nil {
 		return time.Time{}, err
 	}
-	paths := []string{"HEAD", "logs/HEAD"}
+	paths := []string{"HEAD"}
+	event, err := reflogLastActivity(ctx, r, "HEAD")
+	if err != nil {
+		return time.Time{}, err
+	}
+	if event.After(latest) {
+		latest = event
+	}
 	// A clean index can be refreshed by status without user activity. When
 	// changes are staged, its timestamp conservatively protects recent staging.
 	staged, err := r.git(ctx, "diff", "--cached", "--name-only", "-z")
@@ -69,9 +76,6 @@ func worktreeLastActivity(ctx context.Context, r repository, wt Worktree) (time.
 			return time.Time{}, err
 		}
 		info, err := os.Lstat(filepath.Join(admin, filepath.FromSlash(name)))
-		if errors.Is(err, fs.ErrNotExist) && name == "logs/HEAD" {
-			continue
-		}
 		if err != nil {
 			return time.Time{}, err
 		}
@@ -97,7 +101,7 @@ func activityIsStale(last time.Time, days int, now time.Time) bool {
 	return days > 0 && !last.After(now) && now.Sub(last)/(24*time.Hour) >= time.Duration(days)
 }
 
-// staleBranch also considers ref/reflog metadata: a newly created branch at an
+// staleBranch also considers ref updates and reflog events: a new branch at an
 // old commit is recent local work, even when its commit timestamp is old.
 func staleBranch(ctx context.Context, r repository, b Branch, days int, now time.Time) (bool, error) {
 	if days <= 0 {
@@ -112,33 +116,57 @@ func staleBranch(ctx context.Context, r repository, b Branch, days int, now time
 		return false, fmt.Errorf("read branch commit time: %w", err)
 	}
 	latest := time.Unix(seconds, 0)
-	found := false
-	for _, name := range []string{"logs/refs/heads/" + b.Name, "refs/heads/" + b.Name} {
+	event, err := reflogLastActivity(ctx, r, "refs/heads/"+b.Name)
+	if err != nil {
+		return false, err
+	}
+	if event.After(latest) {
+		latest = event
+	}
+	// Loose refs record creation/update even when reflog recording was disabled.
+	// Packing removes loose refs; its global file timestamp is not activity.
+	info, err := os.Lstat(filepath.Join(r.CommonDir, "refs", "heads", filepath.FromSlash(b.Name)))
+	if err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return false, err
+	}
+	if errors.Is(err, fs.ErrNotExist) && event.IsZero() {
+		// Packing can erase the only creation timestamp of a newly created
+		// branch with reflogs disabled. Commit age cannot prove branch age.
+		return false, nil
+	}
+	if err == nil && info.ModTime().After(latest) {
+		latest = info.ModTime()
+	}
+
+	return activityIsStale(latest, days, now), nil
+}
+
+// Reflog file mtimes change during expiration/repacking. Only event timestamps
+// describe user activity; scan all entries in case clocks moved backwards.
+func reflogLastActivity(ctx context.Context, r repository, ref string) (time.Time, error) {
+	out, err := r.git(ctx, "reflog", "show", "--format=%gD", "--date=unix", ref, "--")
+	if err != nil {
+		return time.Time{}, err
+	}
+	var latest time.Time
+	for line := range strings.SplitSeq(out, "\n") {
 		if err := ctx.Err(); err != nil {
-			return false, err
+			return time.Time{}, err
 		}
-		info, err := os.Lstat(filepath.Join(r.CommonDir, filepath.FromSlash(name)))
-		if errors.Is(err, fs.ErrNotExist) {
+		if line == "" {
 			continue
 		}
-		if err != nil {
-			return false, err
+		_, stamp, ok := strings.CutLast(line, "@{")
+		if !ok || !strings.HasSuffix(stamp, "}") {
+			return time.Time{}, fmt.Errorf("invalid reflog timestamp for %s", ref)
 		}
-		found = true
-		if info.ModTime().After(latest) {
-			latest = info.ModTime()
+		seconds, err := strconv.ParseInt(strings.TrimSuffix(stamp, "}"), 10, 64)
+		if err != nil {
+			return time.Time{}, fmt.Errorf("read reflog timestamp: %w", err)
+		}
+		if event := time.Unix(seconds, 0); event.After(latest) {
+			latest = event
 		}
 	}
-	if !found {
-		// A packed ref without a reflog has no individual creation timestamp;
-		// conservatively treat repacking as activity for all such refs.
-		info, err := os.Stat(filepath.Join(r.CommonDir, "packed-refs"))
-		if err != nil {
-			return false, fmt.Errorf("read branch activity metadata: %w", err)
-		}
-		if info.ModTime().After(latest) {
-			latest = info.ModTime()
-		}
-	}
-	return activityIsStale(latest, days, now), nil
+	return latest, nil
 }
