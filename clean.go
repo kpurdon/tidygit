@@ -42,7 +42,6 @@ func clean(ctx context.Context, r repository, opts options) (result repoResult, 
 	} else if state != "" {
 		return fail("checking repository state", fmt.Errorf("%s in progress; finish or abort it before cleanup", state))
 	}
-	uiSection(result.Name)
 	detecting := uiSpinner("Detecting default branch")
 	defaultBranch, err := r.defaultBranch(ctx)
 	detecting()

@@ -58,9 +58,9 @@ func formatOutput(s string, width int, color bool) string {
 func uiPrint(s string) { fmt.Fprintln(os.Stdout, formatOutput(s, terminalWidth(), colorOutput())) }
 func uiBrand()         { uiPrint("\n" + sectionStyle.Render("  git tidy") + dimStyle.Render(" by kp")) }
 func uiProgress(current, total int, name string) {
-	uiPrint(fmt.Sprintf("  [%d/%d] %s", current, total, displayText(name)))
+	uiSection(fmt.Sprintf("[%d/%d] %s", current, total, name))
 }
-func uiSection(s string) { uiPrint("\n" + sectionStyle.Render("  "+displayText(s)) + "\n") }
+func uiSection(s string) { uiPrint("\n" + sectionStyle.Render("  "+displayText(s))) }
 func uiOK(s string)      { uiPrint("  " + okStyle.Render("✓") + " " + displayText(s)) }
 func uiWarn(s string)    { uiPrint("  " + warnStyle.Render("!") + " " + displayText(s)) }
 func uiItem(s string)    { uiPrint("\n  ▸ " + displayText(s)) }

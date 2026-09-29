@@ -162,6 +162,7 @@ func run(ctx context.Context, args []string) error {
 		return err
 	}
 	uiBrand()
+	uiSection(filepath.Base(repo.Dir))
 	result, err := clean(ctx, repo, opts)
 	uiSummary([]repoResult{result})
 	if err != nil {
