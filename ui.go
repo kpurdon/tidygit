@@ -60,12 +60,14 @@ func uiBrand()         { uiPrint("\n" + sectionStyle.Render("  git tidy") + dimS
 func uiProgress(current, total int, name string) {
 	uiPrint(fmt.Sprintf("  [%d/%d] %s", current, total, displayText(name)))
 }
-func uiSection(s string)   { uiPrint("\n" + sectionStyle.Render("  "+displayText(s)) + "\n") }
-func uiOK(s string)        { uiPrint("  " + okStyle.Render("✓") + " " + displayText(s)) }
-func uiWarn(s string)      { uiPrint("  " + warnStyle.Render("!") + " " + displayText(s)) }
-func uiItem(s string)      { uiPrint("  ▸ " + displayText(s)) }
-func uiDim(s string)       { uiPrint("    " + dimStyle.Render(displayText(s))) }
-func uiKeep(reason string) { uiDim("Kept: " + reason) }
+func uiSection(s string) { uiPrint("\n" + sectionStyle.Render("  "+displayText(s)) + "\n") }
+func uiOK(s string)      { uiPrint("  " + okStyle.Render("✓") + " " + displayText(s)) }
+func uiWarn(s string)    { uiPrint("  " + warnStyle.Render("!") + " " + displayText(s)) }
+func uiItem(s string)    { uiPrint("  ▸ " + displayText(s)) }
+func uiDim(s string)     { uiPrint("    " + dimStyle.Render(displayText(s))) }
+func uiKeep(reason string) {
+	uiPrint("    " + warnStyle.Bold(true).Render("↳ KEPT") + " · " + displayText(reason) + "\n")
+}
 func uiErr(s string) {
 	prefix := "  ✗ "
 	_, disabled := os.LookupEnv("NO_COLOR")
