@@ -4,7 +4,7 @@ Tidy Git repositories, local branches, and worktrees with a styled terminal UI a
 
 ## Install
 
-Requires Git and Go 1.27.1 or later to build. Install [GitHub CLI](https://cli.github.com/) and authenticate with `gh auth login` for PR information and automatic cleanup.
+Requires Git and Go 1.27.2 or later to build. Install [GitHub CLI](https://cli.github.com/) and authenticate with `gh auth login` for PR information and automatic cleanup.
 
 ```sh
 go install github.com/kpurdon/tidygit@latest
