@@ -208,7 +208,7 @@ func cleanRepository(ctx context.Context, r repository, opts options) (result re
 		}
 	}
 	done := uiSpinner("Checking PRs")
-	prs, err := ghFetchPRs(ctx, r, lookupCandidates, opts)
+	prs, err := ghFetchPRs(ctx, r, defaultBranch, lookupCandidates, opts)
 	done()
 	if err != nil {
 		if ctx.Err() != nil {
