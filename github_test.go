@@ -174,7 +174,7 @@ func TestFetchPRBoundedConcurrentLookups(t *testing.T) {
 
 func TestFetchPRUnknownSources(t *testing.T) {
 	branches := []Branch{{Name: "local"}, {Name: "missing-head", SourceRepo: "github.com/me/repo"}}
-	got, err := ghFetchPRs(t.Context(), repository{Dir: t.TempDir()}, branches, options{})
+	got, err := ghFetchPRs(t.Context(), repository{Dir: t.TempDir()}, "main", branches, options{})
 	if err != nil || len(got) != 0 {
 		t.Fatalf("unknown branch identity triggered external lookup: %v, %v", got, err)
 	}
@@ -190,7 +190,7 @@ func TestLocalPRPrecedesTrackedParent(t *testing.T) {
 				}
 				return `[{"number":1,"headRefName":"child","headRefOid":"different-tip","state":"` + state + `","headRepository":{"name":"repo"},"headRepositoryOwner":{"login":"me"}}]`, nil
 			}
-			got, err := fetchPRs(t.Context(), command, "github.com/me/repo", []Branch{b}, options{PRLimit: 10})
+			got, err := fetchPRs(t.Context(), command, "github.com/me/repo", "main", []Branch{b}, options{PRLimit: 10})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -205,7 +205,7 @@ func TestNamedPRUsesLocalForkIdentity(t *testing.T) {
 	b := Branch{Name: "child", OID: "tip", LocalRepo: "github.com/me/repo", SourceRepo: "github.com/upstream/repo", SourceBranch: "main"}
 	got, err := fetchPRs(t.Context(), func(context.Context, string, ...string) (string, error) {
 		return `[{"number":3,"headRefName":"child","headRefOid":"tip","state":"CLOSED","headRepository":{"name":"repo"},"headRepositoryOwner":{"login":"other"}},{"number":2,"headRefName":"child","headRefOid":"tip","state":"OPEN","headRepository":{"name":"repo"},"headRepositoryOwner":{"login":"me"}}]`, nil
-	}, "github.com/upstream/repo", []Branch{b}, options{PRLimit: 10})
+	}, "github.com/upstream/repo", "main", []Branch{b}, options{PRLimit: 10})
 	if err != nil || got[b.Name].Number != 2 {
 		t.Fatalf("got %+v, %v", got, err)
 	}
@@ -219,7 +219,7 @@ func TestMismatchedTerminalUpstreamDoesNotHideAssociatedOpenPR(t *testing.T) {
 	t.Setenv("TEST_ASSOCIATIONS", associations)
 	f.write(filepath.Join(f.root, "bin", "gh"), "#!/bin/sh\nif [ \"$1\" = api ]; then cat \"$TEST_ASSOCIATIONS\"; else cat \"$TEST_PRS\"; fi\n")
 	branch := Branch{Name: "renamed", OID: "local-tip", LocalRepo: "github.com/audit/repo", SourceRepo: "github.com/audit/repo", SourceBranch: "sibling"}
-	got, err := ghFetchPRs(t.Context(), f.repo, []Branch{branch}, options{PRLimit: 10, Jobs: 2})
+	got, err := ghFetchPRs(t.Context(), f.repo, "main", []Branch{branch}, options{PRLimit: 10, Jobs: 2})
 	if err != nil {
 		t.Fatal(err)
 	}

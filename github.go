@@ -63,7 +63,7 @@ func githubRepo(raw string) (string, error) {
 	return strings.ToLower(host + "/" + path), nil
 }
 
-func ghFetchPRs(ctx context.Context, r repository, branches []Branch, opts options) (map[string]PR, error) {
+func ghFetchPRs(ctx context.Context, r repository, defaultBranch string, branches []Branch, opts options) (map[string]PR, error) {
 	result := make(map[string]PR)
 	if !slices.ContainsFunc(branches, func(branch Branch) bool {
 		return branch.LocalRepo != "" || branch.SourceRepo != "" && branch.SourceBranch != ""
@@ -92,7 +92,7 @@ func ghFetchPRs(ctx context.Context, r repository, branches []Branch, opts optio
 	if err != nil {
 		return nil, err
 	}
-	result, err = fetchPRs(ctx, r.command, target, branches, opts)
+	result, err = fetchPRs(ctx, r.command, target, defaultBranch, branches, opts)
 	if err != nil {
 		return nil, err
 	}
@@ -159,7 +159,7 @@ func associatedBranchPR(ctx context.Context, r repository, target string, b Bran
 	return selected, nil
 }
 
-func fetchPRs(ctx context.Context, command func(context.Context, string, ...string) (string, error), target string, branches []Branch, opts options) (map[string]PR, error) {
+func fetchPRs(ctx context.Context, command func(context.Context, string, ...string) (string, error), target, defaultBranch string, branches []Branch, opts options) (map[string]PR, error) {
 	named := make([]Branch, 0, len(branches))
 	for _, b := range branches {
 		if b.SourceBranch == "" && b.LocalRepo == "" {
@@ -177,6 +177,10 @@ func fetchPRs(ctx context.Context, command func(context.Context, string, ...stri
 	}
 	var aliases []Branch
 	for _, b := range branches {
+		// Tracking the default branch describes a base, not a renamed PR branch.
+		if b.SourceBranch == defaultBranch && strings.EqualFold(b.SourceRepo, b.LocalRepo) {
+			continue
+		}
 		if _, found := result[b.Name]; !found && b.SourceBranch != b.Name {
 			aliases = append(aliases, b)
 		}

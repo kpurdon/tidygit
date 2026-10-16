@@ -133,6 +133,39 @@ func cleanFixture(t *testing.T, f *cleanupFixture, dry bool) repoResult {
 	return r
 }
 
+func TestCleanupBranchTrackingDefaultSkipsReleaseHistory(t *testing.T) {
+	f := newCleanupFixture(t)
+	f.run(f.dir, "branch", "--track", "feature", "origin/main")
+	f.pullRequests("MERGED", map[string]string{"main": f.run(f.dir, "rev-parse", "main")})
+	f.write(filepath.Join(f.root, "bin", "gh"), `#!/bin/sh
+if [ "$1" = api ]; then
+  printf '%s\n' '{"data":{"repository":{"object":null,"pullRequest":null}}}'
+elif [ "$1" = pr ] && [ "$2" = list ]; then
+  while [ "$#" -gt 0 ]; do
+    if [ "$1" = --head ] && [ "$2" = main ]; then
+      cat "$TEST_PRS"
+      exit
+    fi
+    shift
+  done
+  printf '[]\n'
+else
+  exit 1
+fi
+`)
+	opts := defaultOptions()
+	opts.Auto, opts.DryRun = true, true
+	opts.StaleDays, opts.PRLimit = 0, 1
+	result, err := clean(t.Context(), f.repo, opts)
+	if err != nil || len(result.Errors) != 0 {
+		t.Fatalf("default branch history blocked cleanup: %v, %+v", err, result)
+	}
+	if result.PRsFound != 0 || result.BranchesPlanned != 0 {
+		t.Fatalf("default branch PR authorized feature cleanup: %+v", result)
+	}
+	f.assertBranch("feature", true)
+}
+
 func TestAutoPreservesDirtyAndNewerWork(t *testing.T) {
 	for _, state := range []string{"MERGED", "CLOSED"} {
 		t.Run(state, func(t *testing.T) {
