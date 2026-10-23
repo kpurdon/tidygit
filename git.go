@@ -196,10 +196,10 @@ func (r repository) deleteBranch(ctx context.Context, b Branch) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	for _, wt := range worktrees {
-		if wt.Branch == b.Name {
-			return false, fmt.Errorf("branch %s is checked out in %s; keeping it", b.Name, wt.Path)
-		}
+	if path, err := r.checkedOutWorktree(b.Name, worktrees); err != nil {
+		return false, err
+	} else if path != "" {
+		return false, fmt.Errorf("branch %s is checked out in %s; keeping it", b.Name, path)
 	}
 	if state, err := r.worktreeOperation(ctx, worktrees); err != nil {
 		return false, err
@@ -219,6 +219,39 @@ func (r repository) deleteBranch(ctx context.Context, b Branch) (bool, error) {
 	}
 	_, err = r.git(ctx, "config", "--local", "--remove-section", "branch."+b.Name)
 	return true, err
+}
+
+// Loose refs can alias on disk even when symbolic HEAD uses a different spelling.
+// Packed refs are case-sensitive, so matching names by case alone is insufficient.
+func (r repository) checkedOutWorktree(branch string, worktrees []Worktree) (string, error) {
+	for _, wt := range worktrees {
+		if wt.Branch == branch {
+			return wt.Path, nil
+		}
+	}
+	ref, err := os.Stat(filepath.Join(r.CommonDir, "refs", "heads", branch))
+	if os.IsNotExist(err) {
+		return "", nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("checking branch %s ownership: %w", branch, err)
+	}
+	for _, wt := range worktrees {
+		if wt.Branch == "" {
+			continue
+		}
+		other, err := os.Stat(filepath.Join(r.CommonDir, "refs", "heads", wt.Branch))
+		if os.IsNotExist(err) {
+			continue
+		}
+		if err != nil {
+			return "", fmt.Errorf("checking worktree %s branch: %w", wt.Path, err)
+		}
+		if os.SameFile(ref, other) {
+			return wt.Path, nil
+		}
+	}
+	return "", nil
 }
 
 func (r repository) protects(path string) bool {

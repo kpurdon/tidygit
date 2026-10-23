@@ -156,6 +156,12 @@ func uiSummary(results []repoResult) {
 		if !r.Unchanged {
 			uiDim(summaryCounts(r))
 		}
+		if r.Repaired {
+			uiDim("repair verified by a fresh cleanup run")
+		}
+		if r.RepairLog != "" {
+			uiDim("Repair transcript: " + r.RepairLog)
+		}
 		if len(r.Errors) > 0 && !r.Canceled {
 			failed++
 		}

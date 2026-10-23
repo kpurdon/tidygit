@@ -46,6 +46,69 @@ func TestDeleteBranchRefusesMovedOrCheckedOutBranch(t *testing.T) {
 	f.assertBranch("main", true)
 }
 
+func caseAliasedWorktree(t *testing.T) (*cleanupFixture, string, string, string) {
+	t.Helper()
+	f := newCleanupFixture(t)
+	name := "infra-5953/foo"
+	path := filepath.Join(f.root, "aliased")
+	oid := f.branch(name, path)
+	lower, err := os.Stat(filepath.Join(f.repo.CommonDir, "refs", "heads", name))
+	if err != nil {
+		t.Fatal(err)
+	}
+	upper, err := os.Stat(filepath.Join(f.repo.CommonDir, "refs", "heads", "INFRA-5953/foo"))
+	if os.IsNotExist(err) {
+		t.Skip("filesystem does not alias differently cased loose refs")
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !os.SameFile(lower, upper) {
+		t.Skip("differently cased loose refs identify distinct files")
+	}
+	f.run(path, "symbolic-ref", "HEAD", "refs/heads/INFRA-5953/foo")
+	if got := f.run(path, "rev-parse", "HEAD"); got != oid {
+		t.Fatalf("case alias resolves to %s, want %s", got, oid)
+	}
+	return f, path, name, oid
+}
+
+func TestDeleteBranchRefusesCaseAliasedWorktree(t *testing.T) {
+	f, path, name, oid := caseAliasedWorktree(t)
+	deleted, err := f.repo.deleteBranch(t.Context(), Branch{Name: name, OID: oid})
+	if deleted || err == nil {
+		t.Fatalf("deleted a checked-out loose-ref alias: deleted=%v err=%v", deleted, err)
+	}
+	f.assertBranch(name, true)
+	if got := f.run(path, "rev-parse", "HEAD"); got != oid {
+		t.Fatalf("worktree HEAD changed: got %s want %s", got, oid)
+	}
+}
+
+func TestDeleteBranchKeepsCaseDistinctPackedRefsIndependent(t *testing.T) {
+	f := newCleanupFixture(t)
+	oid := f.branch("topic", "")
+	f.run(f.dir, "pack-refs", "--all", "--prune")
+	path := filepath.Join(f.root, "upper")
+	f.branch("TOPIC", path)
+	f.run(f.dir, "pack-refs", "--all", "--prune")
+	for _, name := range []string{"topic", "TOPIC"} {
+		if _, err := os.Stat(filepath.Join(f.repo.CommonDir, "refs", "heads", name)); !os.IsNotExist(err) {
+			t.Fatalf("expected packed-only ref %s: %v", name, err)
+		}
+		f.assertBranch(name, true)
+	}
+	deleted, err := f.repo.deleteBranch(t.Context(), Branch{Name: "topic", OID: oid})
+	if !deleted || err != nil {
+		t.Fatalf("distinct packed branch was treated as checked out: deleted=%v err=%v", deleted, err)
+	}
+	f.assertBranch("topic", false)
+	f.assertBranch("TOPIC", true)
+	if got := f.run(path, "rev-parse", "HEAD"); got != oid {
+		t.Fatalf("checked-out packed ref changed: got %s want %s", got, oid)
+	}
+}
+
 func TestDeleteBranchAtomicallyPreservesConcurrentUpdate(t *testing.T) {
 	f := newCleanupFixture(t)
 	original := f.branch("racing", "")

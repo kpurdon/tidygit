@@ -17,16 +17,17 @@ import (
 var version = "dev"
 
 type options struct {
-	Auto, DryRun, Rebase, Force, Help, Version bool
-	PRLimit                                    int
-	PRAuthor                                   string
-	Timeout                                    time.Duration
-	Jobs                                       int
-	StaleDays                                  int
+	Auto, DryRun, Rebase, Force, Fix, Help, Version bool
+	PRLimit                                         int
+	PRAuthor                                        string
+	Timeout                                         time.Duration
+	AgentTimeout                                    time.Duration
+	Jobs                                            int
+	StaleDays                                       int
 }
 
 func defaultOptions() options {
-	return options{PRLimit: 100, PRAuthor: "@me", Timeout: 30 * time.Second, Jobs: 4, StaleDays: 14}
+	return options{PRLimit: 100, PRAuthor: "@me", Timeout: 30 * time.Second, AgentTimeout: 5 * time.Minute, Jobs: 4, StaleDays: 14}
 }
 
 const usage = `Usage: tidygit [options] [all [dir]]
@@ -36,11 +37,13 @@ Tidy the current repository or immediate repositories in a directory.
   --auto                  Clean up completed or archived stale work; never prompt
   --dry-run               Show proposed cleanup without changing repositories
   --force                 Recheck unchanged repositories; keep all deletion safeguards
+  --fix                   Use the configured agent to repair operational failures
   --stale-days N           Archive inactive work after N days (default 14; 0 disables)
   --pr-limit N            PR lookup limit (default 100)
   --exclude-pr-filtering  Include all authors in the initial PR lookup
   --rebase                Rebase the default branch instead of fast-forward only
   --timeout DURATION      Timeout per Git/GitHub command (default 30s)
+  --agent-timeout DURATION Timeout for each agent repair attempt (default 5m)
   --jobs N                Concurrent discovery/PR lookups (default 4)
   --version               Print version
   -h, --help              Show this help
@@ -62,7 +65,7 @@ func parseArgs(args []string) (options, string, bool, error) {
 		}
 		name, value, hasValue := strings.Cut(arg, "=")
 		switch name {
-		case "--pr-limit", "--timeout", "--jobs", "--stale-days":
+		case "--pr-limit", "--timeout", "--agent-timeout", "--jobs", "--stale-days":
 			if !hasValue {
 				i++
 				if i == len(args) {
@@ -70,12 +73,16 @@ func parseArgs(args []string) (options, string, bool, error) {
 				}
 				value = args[i]
 			}
-			if name == "--timeout" {
+			if name == "--timeout" || name == "--agent-timeout" {
 				d, err := time.ParseDuration(value)
 				if err != nil || d <= 0 {
-					return opts, "", false, errors.New("--timeout must be a positive duration")
+					return opts, "", false, fmt.Errorf("%s must be a positive duration", name)
 				}
-				opts.Timeout = d
+				if name == "--agent-timeout" {
+					opts.AgentTimeout = d
+				} else {
+					opts.Timeout = d
+				}
 			} else {
 				n, err := strconv.Atoi(value)
 				if name == "--stale-days" {
@@ -94,7 +101,7 @@ func parseArgs(args []string) (options, string, bool, error) {
 					opts.PRLimit = n
 				}
 			}
-		case "--auto", "--dry-run", "--rebase", "--force", "--exclude-pr-filtering", "--version", "--help", "-h":
+		case "--auto", "--dry-run", "--rebase", "--force", "--fix", "--exclude-pr-filtering", "--version", "--help", "-h":
 			if hasValue {
 				return opts, "", false, fmt.Errorf("%s does not accept a value", name)
 			}
@@ -105,6 +112,8 @@ func parseArgs(args []string) (options, string, bool, error) {
 				opts.DryRun = true
 			case "--force":
 				opts.Force = true
+			case "--fix":
+				opts.Fix = true
 			case "--rebase":
 				opts.Rebase = true
 			case "--exclude-pr-filtering":
