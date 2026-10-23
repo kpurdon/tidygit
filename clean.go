@@ -20,6 +20,9 @@ type repoResult struct {
 	Unchanged                                                            bool
 	Archives                                                             []string
 	Errors                                                               []string
+	RepairLog                                                            string
+	Repaired                                                             bool
+	repairStage                                                          string
 	cacheFingerprint                                                     string
 }
 
@@ -36,6 +39,15 @@ func clean(ctx context.Context, r repository, opts options) (result repoResult, 
 		result.Canceled = errors.Is(returnedErr, context.Canceled) || errors.Is(returnedErr, ErrUserAborted)
 	}()
 	result = repoResult{Name: filepath.Base(r.Dir), DryRun: opts.DryRun}
+	agent := ""
+	if opts.Fix && !opts.DryRun {
+		var err error
+		agent, err = configuredRepairAgent(ctx, r)
+		if err != nil {
+			result.addErr("configuring repair agent", err)
+			return result, ctx.Err()
+		}
+	}
 	var fingerprint string
 	var scanErr error
 	if !opts.DryRun && !opts.Force {
@@ -64,6 +76,9 @@ func clean(ctx context.Context, r repository, opts options) (result repoResult, 
 		}
 	}
 	result, returnedErr = cleanRepository(ctx, r, opts)
+	if agent != "" && returnedErr == nil && ctx.Err() == nil && result.repairStage != "" {
+		result, returnedErr = repairRepository(ctx, r, opts, agent, result)
+	}
 	if returnedErr == nil && len(result.Errors) == 0 && !opts.DryRun && result.cacheFingerprint != "" && ctx.Err() == nil {
 		if err := writeRunMarker(r, result.cacheFingerprint); err != nil {
 			uiWarn("Unable to save local marker: " + err.Error())
@@ -88,6 +103,7 @@ func cleanRepository(ctx context.Context, r repository, opts options) (result re
 	defaultBranch, err := r.defaultBranch(ctx)
 	detecting()
 	if err != nil {
+		result.repairStage = "detecting default branch"
 		return fail("detecting default branch", err)
 	}
 	result.DefaultBranch = defaultBranch
@@ -100,6 +116,7 @@ func cleanRepository(ctx context.Context, r repository, opts options) (result re
 		_, err = r.git(ctx, "fetch", "--all", "--prune")
 		done()
 		if err != nil {
+			result.repairStage = "fetching"
 			return fail("fetching", err)
 		}
 		uiAction("FETCHED", "remote refs pruned")
@@ -215,6 +232,9 @@ func cleanRepository(ctx context.Context, r repository, opts options) (result re
 			return result, ctx.Err()
 		}
 		if opts.Auto || !errors.Is(err, errGHUnavailable) {
+			if !errors.Is(err, errGHUnavailable) {
+				result.repairStage = "fetching PRs"
+			}
 			return fail("fetching PRs", err)
 		}
 		uiWarn("GitHub CLI is unavailable; PR status cannot be verified")

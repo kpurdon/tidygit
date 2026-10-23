@@ -51,8 +51,24 @@ Every run ends with a summary of removals, retained work, and failures. Output k
 | `--pr-limit N` | `100` | Maximum PRs per batch or targeted lookup |
 | `--stale-days N` | `14` | Archive inactive work before removal; `0` disables age-based cleanup |
 | `--exclude-pr-filtering` | Off | Remove the default `@me` author filter from the initial batch; targeted fallback lookups include other authors regardless |
-| `--timeout duration` | `30s` | Timeout for each external command |
+| `--timeout duration` | `30s` | Timeout for each Git/GitHub command |
+| `--agent-timeout duration` | `5m` | Timeout for each agent repair attempt |
 | `--jobs N` | `4` | Concurrent read-only repository discovery and PR lookups |
+
+## Agent repair
+
+Install and authenticate Codex or Claude Code, select it with Git configuration, and opt in to repair for a run:
+
+```sh
+git config --global tidygit.agent codex  # or claude
+tidygit --auto --fix
+```
+
+`--fix` allows one agent repair attempt per repository when default-branch detection, fetching, or the initial PR lookup fails. The agent proposes a retry or pruning stale remote-tracking refs for a conventional fetch mapping. Tidygit validates the action, executes it, and reruns its checks before reporting success. History rewrites, conflict resolution, and bypassing cleanup protections are outside this mode; `--dry-run` never invokes the agent.
+
+The selected provider receives failure messages, the repository path, Git status, and eligible remote names. Diagnosis reuses CLI authentication with command execution, hooks, and integrations disabled; user customizations are not loaded. Use a current CLI supporting the required isolation and structured-output flags; unsupported flags leave the original failure unresolved.
+
+Repair transcripts are saved under `${XDG_STATE_HOME:-~/.local/state}/tidygit/repairs`. Use `--agent-timeout 10m` to override the five-minute agent timeout independently of Git/GitHub command timeouts.
 
 ## Shell aliases
 
