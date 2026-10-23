@@ -5,12 +5,13 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
 )
 
-func repairFixture(t *testing.T, agent, action, failure string) (*cleanupFixture, options) {
+func repairFixture(t *testing.T, agent, report, failure string) (*cleanupFixture, options) {
 	t.Helper()
 	f := newCleanupFixture(t)
 	f.run(f.dir, "config", "tidygit.agent", agent)
@@ -18,8 +19,11 @@ func repairFixture(t *testing.T, agent, action, failure string) (*cleanupFixture
 	t.Setenv("TEST_FETCH_CALLS", filepath.Join(f.root, "fetch-calls"))
 	t.Setenv("TEST_FETCH_FAILURE", failure)
 	t.Setenv("TEST_REPAIR_AGENT", agent)
-	t.Setenv("TEST_REPAIR_PLAN", action)
+	t.Setenv("TEST_REPAIR_REPORT", report)
 	t.Setenv("TEST_REPAIR_MCP", "")
+	t.Setenv("TEST_REPAIR_REPO", f.dir)
+	t.Setenv("TEST_REPAIR_ARGS", filepath.Join(f.root, "agent-args"))
+	t.Setenv("TEST_REPAIR_CHANGE", "")
 	bin := filepath.Join(f.root, "bin")
 	f.write(filepath.Join(bin, "git"), `#!/bin/sh
 if [ "$1" = remote ] && [ "$2" = get-url ]; then exec "$TEST_REAL_GIT" config --get "remote.$3.url"; fi
@@ -27,7 +31,7 @@ if [ "$1" = fetch ]; then
   first=no
   if [ ! -f "$TEST_FETCH_CALLS" ]; then first=yes; fi
   echo fetch >> "$TEST_FETCH_CALLS"
-  if [ "$TEST_FETCH_FAILURE" = always ] || { [ "$TEST_FETCH_FAILURE" = once ] && [ "$first" = yes ]; }; then
+  if [ "$TEST_FETCH_FAILURE" = always ] || { [ "$TEST_FETCH_FAILURE" = once ] && [ "$first" = yes ]; } || { [ "$TEST_FETCH_FAILURE" = remote-ref ] && "$TEST_REAL_GIT" show-ref --verify --quiet refs/remotes/origin/stale; }; then
     echo 'transient fetch failure' >&2
     exit 1
   fi
@@ -64,16 +68,33 @@ if [ "$1" = mcp ]; then
 fi
 if [ -n "$TEST_REPAIR_MCP" ] && { [ "$disabled" != true ] || [ "$transport" != true ]; }; then exit 7; fi
 echo agent >> "$TEST_REPAIR_CALLS"
+printf '%s\n' "$@" > "$TEST_REPAIR_ARGS"
 cat >/dev/null
-if [ -n "$TEST_REPAIR_MUTATE" ]; then printf 'concurrent edit\n' > "$TEST_REPAIR_MUTATE"; fi
-if [ "$TEST_REPAIR_PLAN" = wait ]; then exec sleep 30; fi
+case "$TEST_REPAIR_CHANGE" in
+  tracked) printf 'concurrent edit\n' > "$TEST_REPAIR_REPO/tracked" ;;
+  branch) "$TEST_REAL_GIT" -C "$TEST_REPAIR_REPO" branch agent-created ;;
+  config) "$TEST_REAL_GIT" -C "$TEST_REPAIR_REPO" config tidygit.keep agent-kept ;;
+  remote)
+    oid=$("$TEST_REAL_GIT" -C "$TEST_REPAIR_REPO" rev-parse refs/remotes/origin/stale) || exit 9
+    "$TEST_REAL_GIT" -C "$TEST_REPAIR_REPO" update-ref -d refs/remotes/origin/stale "$oid" || exit 9
+    ;;
+esac
+if [ "$TEST_REPAIR_REPORT" = wait ]; then exec sleep 30; fi
+if [ "$TEST_REPAIR_REPORT" = wait-detached ] || [ "$TEST_REPAIR_REPORT" = crash-detached ]; then
+  trap 'printf INT > "$TEST_REPAIR_SIGNAL"; exit 0' INT
+  trap 'printf TERM > "$TEST_REPAIR_SIGNAL"; exit 0' TERM
+  "$TEST_REPAIR_CHILD_EXEC" -test.run='^TestRepairDetachedChild$' </dev/null &
+  if [ "$TEST_REPAIR_REPORT" = crash-detached ]; then sleep 1; exit 9; fi
+  wait
+  exit 0
+fi
 if [ "$TEST_REPAIR_AGENT" = claude ]; then
-  printf '{"is_error":false,"structured_output":%s}\n' "$TEST_REPAIR_PLAN"
+  printf '{"is_error":false,"structured_output":%s}\n' "$TEST_REPAIR_REPORT"
 else
   while [ "$#" -gt 0 ]; do
     if [ "$1" = --output-last-message ]; then
       shift
-      printf '%s\n' "$TEST_REPAIR_PLAN" > "$1"
+      printf '%s\n' "$TEST_REPAIR_REPORT" > "$1"
       exit 0
     fi
     shift
@@ -101,21 +122,21 @@ func repairCallCount(t *testing.T, env string) int {
 	return len(strings.Fields(string(data)))
 }
 
-const retryPlan = `{"action":"retry","remote":"","reason":"Transient fetch failure"}`
+const repairedReport = `{"status":"repaired","summary":"Repaired remote metadata"}`
 
 func TestRepairCodexMCPRestrictions(t *testing.T) {
 	for _, inventory := range []string{"enabled", "disabled", "http", "managed", "malformed", "unsupported", "null"} {
 		t.Run(inventory, func(t *testing.T) {
-			_, _ = repairFixture(t, "codex", retryPlan, "")
+			f, _ := repairFixture(t, "codex", repairedReport, "")
 			t.Setenv("TEST_REPAIR_MCP", inventory)
-			plan, err := runRepairAgent(t.Context(), "codex", t.TempDir(), "diagnose", time.Second)
+			report, err := runRepairAgent(t.Context(), "codex", t.TempDir(), "diagnose", time.Second, f.repo)
 			blocked := inventory == "managed" || inventory == "malformed" || inventory == "unsupported" || inventory == "null"
 			if blocked {
 				if err == nil || repairCallCount(t, "TEST_REPAIR_CALLS") != 0 {
 					t.Fatalf("unsafe MCP inventory started diagnosis: %v", err)
 				}
-			} else if err != nil || plan.Action != "retry" || repairCallCount(t, "TEST_REPAIR_CALLS") != 1 {
-				t.Fatalf("MCP override missing from diagnosis: %+v, %v", plan, err)
+			} else if err != nil || report.Status != "repaired" || repairCallCount(t, "TEST_REPAIR_CALLS") != 1 {
+				t.Fatalf("MCP override missing from diagnosis: %+v, %v", report, err)
 			}
 		})
 	}
@@ -124,13 +145,23 @@ func TestRepairCodexMCPRestrictions(t *testing.T) {
 func TestRepairRetryProvidersAndMarker(t *testing.T) {
 	for _, agent := range []string{"codex", "claude"} {
 		t.Run(agent, func(t *testing.T) {
-			f, opts := repairFixture(t, agent, retryPlan, "once")
+			f, opts := repairFixture(t, agent, repairedReport, "remote-ref")
+			oid := f.branch("local-only", "")
+			f.run(f.dir, "tag", "local-tag")
+			f.run(f.dir, "update-ref", "refs/remotes/origin/stale", oid)
+			t.Setenv("TEST_REPAIR_CHANGE", "remote")
 			result, err := clean(t.Context(), f.repo, opts)
 			if err != nil || len(result.Errors) != 0 || !result.Repaired {
 				t.Fatalf("repair failed: %+v, %v", result, err)
 			}
 			if repairCallCount(t, "TEST_REPAIR_CALLS") != 1 || repairCallCount(t, "TEST_FETCH_CALLS") != 2 {
 				t.Fatal("expected one agent attempt and one fresh fetch after the failure")
+			}
+			if f.run(f.dir, "for-each-ref", "--format=%(refname)", "refs/remotes/origin/stale") != "" {
+				t.Fatal("agent did not repair remote metadata")
+			}
+			if f.run(f.dir, "rev-parse", "refs/heads/local-only") != oid || f.run(f.dir, "rev-parse", "refs/tags/local-tag") != oid {
+				t.Fatal("repair changed local branches or tags")
 			}
 			prompt, err := os.ReadFile(filepath.Join(result.RepairLog, "prompt.txt"))
 			if err != nil || !strings.Contains(string(prompt), f.dir) || !strings.Contains(string(prompt), "transient fetch failure") {
@@ -145,7 +176,7 @@ func TestRepairRetryProvidersAndMarker(t *testing.T) {
 }
 
 func TestRepairFailureDoesNotLoopOrCache(t *testing.T) {
-	f, opts := repairFixture(t, "codex", retryPlan, "always")
+	f, opts := repairFixture(t, "codex", repairedReport, "always")
 	result, err := clean(t.Context(), f.repo, opts)
 	if err != nil || len(result.Errors) == 0 || result.Repaired {
 		t.Fatalf("persistent failure disappeared: %+v, %v", result, err)
@@ -164,7 +195,7 @@ func TestRepairFailureDoesNotLoopOrCache(t *testing.T) {
 func TestRepairOptInAndDryRun(t *testing.T) {
 	for _, dryRun := range []bool{false, true} {
 		t.Run(map[bool]string{false: "off", true: "dry-run"}[dryRun], func(t *testing.T) {
-			f, opts := repairFixture(t, "codex", retryPlan, "always")
+			f, opts := repairFixture(t, "codex", repairedReport, "always")
 			opts.Fix, opts.DryRun = dryRun, dryRun
 			result, err := clean(t.Context(), f.repo, opts)
 			if err != nil || result.Repaired || repairCallCount(t, "TEST_REPAIR_CALLS") != 0 {
@@ -177,36 +208,66 @@ func TestRepairOptInAndDryRun(t *testing.T) {
 	}
 }
 
-func TestRepairRejectsUnsupportedAction(t *testing.T) {
-	f, opts := repairFixture(t, "codex", `{"action":"reset","remote":"","reason":"Discard local history"}`, "once")
-	before := f.run(f.dir, "rev-parse", "HEAD")
+func TestRepairRejectsTranscriptInsideWorktree(t *testing.T) {
+	f, opts := repairFixture(t, "codex", repairedReport, "once")
+	path := filepath.Join(f.root, "linked")
+	f.branch("linked", path)
+	state := filepath.Join(path, "state")
+	t.Setenv("XDG_STATE_HOME", state)
 	result, err := clean(t.Context(), f.repo, opts)
-	if err != nil || len(result.Errors) == 0 || result.Repaired || repairCallCount(t, "TEST_FETCH_CALLS") != 1 {
-		t.Fatalf("unsupported plan ran: %+v, %v", result, err)
+	if err != nil || result.Repaired || !strings.Contains(strings.Join(result.Errors, "\n"), "XDG_STATE_HOME") {
+		t.Fatalf("transcript location was accepted: %+v, %v", result, err)
 	}
-	if f.run(f.dir, "rev-parse", "HEAD") != before {
-		t.Fatal("unsupported plan changed local history")
+	if repairCallCount(t, "TEST_REPAIR_CALLS") != 0 {
+		t.Fatal("agent started with transcripts inside a worktree")
+	}
+	if _, err := os.Stat(filepath.Join(state, "tidygit", "repairs")); !os.IsNotExist(err) {
+		t.Fatalf("repair transcript directory was created: %v", err)
 	}
 }
 
-func TestRepairRejectsChangedRepository(t *testing.T) {
-	f, opts := repairFixture(t, "codex", retryPlan, "once")
-	t.Setenv("TEST_REPAIR_MUTATE", filepath.Join(f.dir, "tracked"))
+func TestRepairBlockedReportKeepsFailure(t *testing.T) {
+	f, opts := repairFixture(t, "codex", `{"status":"blocked","summary":"Another Git process owns the lock"}`, "once")
 	result, err := clean(t.Context(), f.repo, opts)
-	if err != nil || result.Repaired || !strings.Contains(strings.Join(result.Errors, "\n"), "state changed") {
-		t.Fatalf("concurrent edit did not stop repair: %+v, %v", result, err)
+	if err != nil || result.Repaired || !strings.Contains(strings.Join(result.Errors, "\n"), "Another Git process owns the lock") {
+		t.Fatalf("blocked report hid failure or reason: %+v, %v", result, err)
 	}
 	if repairCallCount(t, "TEST_FETCH_CALLS") != 1 {
-		t.Fatal("cleanup retried despite concurrent changes")
+		t.Fatal("blocked repair retried cleanup")
 	}
-	data, err := os.ReadFile(filepath.Join(f.dir, "tracked"))
-	if err != nil || string(data) != "concurrent edit\n" {
-		t.Fatalf("concurrent edit lost: %q, %v", data, err)
+}
+
+func TestRepairRejectsChangedLocalState(t *testing.T) {
+	for _, change := range []string{"tracked", "branch", "config"} {
+		t.Run(change, func(t *testing.T) {
+			f, opts := repairFixture(t, "codex", repairedReport, "once")
+			t.Setenv("TEST_REPAIR_CHANGE", change)
+			result, err := clean(t.Context(), f.repo, opts)
+			if err != nil || result.Repaired || !strings.Contains(strings.Join(result.Errors, "\n"), "local work or configuration changed") {
+				t.Fatalf("unexpected local change did not stop cleanup: %+v, %v", result, err)
+			}
+			if repairCallCount(t, "TEST_FETCH_CALLS") != 1 {
+				t.Fatal("cleanup retried despite changes to local work")
+			}
+			switch change {
+			case "tracked":
+				data, err := os.ReadFile(filepath.Join(f.dir, "tracked"))
+				if err != nil || string(data) != "concurrent edit\n" {
+					t.Fatalf("edit lost: %q, %v", data, err)
+				}
+			case "branch":
+				f.assertBranch("agent-created", true)
+			case "config":
+				if f.run(f.dir, "config", "--get", "tidygit.keep") != "agent-kept" {
+					t.Fatal("changed configuration was overwritten")
+				}
+			}
+		})
 	}
 }
 
 func TestRepairPreservesCallerWorktree(t *testing.T) {
-	f, opts := repairFixture(t, "codex", retryPlan, "once")
+	f, opts := repairFixture(t, "codex", repairedReport, "once")
 	path := filepath.Join(f.root, "caller")
 	oid := f.branch("merged", path)
 	f.pullRequests("MERGED", map[string]string{"merged": oid})
@@ -224,7 +285,7 @@ func TestRepairPreservesCallerWorktree(t *testing.T) {
 func TestRepairDoesNotResolveConflictsOrOperations(t *testing.T) {
 	for _, kind := range []string{"ff", "in-progress"} {
 		t.Run(kind, func(t *testing.T) {
-			f, opts := repairFixture(t, "codex", retryPlan, "")
+			f, opts := repairFixture(t, "codex", repairedReport, "")
 			if kind == "ff" {
 				f.write(filepath.Join(f.dir, "tracked"), "remote\n")
 				f.run(f.dir, "commit", "-am", "remote")
@@ -243,34 +304,48 @@ func TestRepairDoesNotResolveConflictsOrOperations(t *testing.T) {
 	}
 }
 
-func TestRepairPrunesOnlyConventionalRemoteRefs(t *testing.T) {
-	for _, custom := range []bool{false, true} {
-		t.Run(map[bool]string{false: "conventional", true: "custom"}[custom], func(t *testing.T) {
-			f, opts := repairFixture(t, "codex", `{"action":"prune_remote_refs","remote":"origin","reason":"Stale remote-tracking refs block fetch"}`, "once")
-			oid := f.branch("local-only", "")
-			f.run(f.dir, "tag", "local-tag")
-			f.run(f.dir, "update-ref", "refs/remotes/origin/stale", oid)
-			f.run(f.dir, "config", "fetch.pruneTags", "true")
-			f.run(f.dir, "config", "remote.origin.pruneTags", "true")
-			if custom {
-				f.run(f.dir, "config", "--add", "remote.origin.fetch", "+refs/heads/*:refs/heads/*")
+func TestRepairAgentRootsAndPermissions(t *testing.T) {
+	for _, agent := range []string{"codex", "claude"} {
+		t.Run(agent, func(t *testing.T) {
+			f, _ := repairFixture(t, agent, repairedReport, "")
+			path := filepath.Join(f.root, "linked")
+			f.branch("linked", path)
+			r, err := discoverRepo(t.Context(), path, time.Second)
+			if err != nil {
+				t.Fatal(err)
 			}
-			// Isolate the repair action from the subsequent normal fetch, which honors the user's pruneTags setting.
-			original := repoResult{Name: "repo", Errors: []string{"fetch failed"}, repairStage: "fetching"}
-			t.Setenv("TEST_FETCH_FAILURE", "always")
-			result, err := repairRepository(t.Context(), f.repo, opts, "codex", original)
-			if err != nil || result.Repaired {
-				t.Fatalf("expected the subsequent fetch to fail: %+v, %v", result, err)
+			_, err = runRepairAgent(t.Context(), agent, t.TempDir(), "repair", time.Second, r)
+			if err != nil {
+				t.Fatal(err)
 			}
-			if f.run(f.dir, "rev-parse", "refs/heads/local-only") != oid || f.run(f.dir, "rev-parse", "refs/tags/local-tag") != oid {
-				t.Fatal("repair pruned local branches or tags")
+			data, err := os.ReadFile(os.Getenv("TEST_REPAIR_ARGS"))
+			if err != nil {
+				t.Fatal(err)
 			}
-			refs := f.run(f.dir, "for-each-ref", "--format=%(refname)", "refs/remotes/origin/stale")
-			if custom && refs == "" || !custom && refs != "" {
-				t.Fatalf("wrong stale-ref outcome for custom=%v: %q", custom, refs)
+			args := strings.Split(strings.TrimSuffix(string(data), "\n"), "\n")
+			var roots []string
+			values := map[string]string{}
+			for i, arg := range args {
+				if i+1 < len(args) {
+					values[arg] = args[i+1]
+					if arg == "--add-dir" {
+						roots = append(roots, args[i+1])
+					}
+				}
 			}
-			if custom && repairCallCount(t, "TEST_FETCH_CALLS") != 0 {
-				t.Fatal("custom refspec was accepted for repair")
+			wantRoots := []string{r.Dir, r.CommonDir, canonicalPath(f.run(path, "rev-parse", "--absolute-git-dir"))}
+			if !slices.Equal(roots, wantRoots) {
+				t.Fatalf("writable roots = %v, want %v", roots, wantRoots)
+			}
+			if slices.Contains(args, "--dangerously-bypass-approvals-and-sandbox") || slices.Contains(args, "--dangerously-skip-permissions") {
+				t.Fatal("repair bypasses agent permission controls")
+			}
+			if agent == "codex" {
+				if !slices.Contains(args, "--approve-for-me") || slices.Contains(args, "features.shell_tool=false") || slices.Contains(args, "features.unified_exec=false") {
+					t.Fatal("Codex cannot request permission to repair metadata")
+				}
+			} else if values["--permission-mode"] != "auto" || values["--tools"] != "Bash,Read,Edit,Write,Glob,Grep" {
+				t.Fatalf("Claude repair tools or permissions unavailable: %v", args)
 			}
 		})
 	}
@@ -279,7 +354,7 @@ func TestRepairPrunesOnlyConventionalRemoteRefs(t *testing.T) {
 func TestRepairAgentTimeoutAndCancellation(t *testing.T) {
 	for _, cancelParent := range []bool{false, true} {
 		t.Run(map[bool]string{false: "timeout", true: "cancellation"}[cancelParent], func(t *testing.T) {
-			_, _ = repairFixture(t, "codex", "wait", "")
+			f, _ := repairFixture(t, "codex", "wait", "")
 			ctx, cancel := context.WithCancel(t.Context())
 			defer cancel()
 			timeout, expected := 50*time.Millisecond, context.DeadlineExceeded
@@ -288,7 +363,7 @@ func TestRepairAgentTimeoutAndCancellation(t *testing.T) {
 				timer := time.AfterFunc(50*time.Millisecond, cancel)
 				defer timer.Stop()
 			}
-			_, err := runRepairAgent(ctx, "codex", t.TempDir(), "diagnose", timeout)
+			_, err := runRepairAgent(ctx, "codex", t.TempDir(), "diagnose", timeout, f.repo)
 			if !errors.Is(err, expected) {
 				t.Fatalf("expected %v, got %v", expected, err)
 			}

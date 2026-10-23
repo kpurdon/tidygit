@@ -64,11 +64,11 @@ git config --global tidygit.agent codex  # or claude
 tidygit --auto --fix
 ```
 
-`--fix` allows one agent repair attempt per repository when default-branch detection, fetching, or the initial PR lookup fails. The agent proposes a retry or pruning stale remote-tracking refs for a conventional fetch mapping. Tidygit validates the action, executes it, and reruns its checks before reporting success. History rewrites, conflict resolution, and bypassing cleanup protections are outside this mode; `--dry-run` never invokes the agent.
+`--fix` allows one agent repair attempt per repository when default-branch detection, fetching, or the initial PR lookup fails. The agent can inspect the repository and use shell and file tools to repair local Git metadata, including problems such as case-colliding remote-tracking refs. It is instructed to preserve local work and configuration, avoid history rewrites and remote writes, and report unresolved problems. Before resuming cleanup, tidygit checks repository identity, local refs, worktrees, staging, file metadata, and configuration, then reruns normal cleanup checks. `--dry-run` never invokes the agent.
 
-The selected provider receives failure messages, the repository path, Git status, and eligible remote names. Diagnosis reuses CLI authentication and requests restricted execution with user customizations disabled. Codex checks its effective MCP inventory and refuses diagnosis if integrations cannot be disabled; Claude denies MCP tools. Organization-enforced CLI policy still applies. Use a current CLI supporting the required isolation and structured-output flags; unsupported flags leave the original failure unresolved.
+The selected provider receives diagnostics and can read repository content through its tools. Codex uses automatic approval review with a workspace-write sandbox and explicit access to the repository and its Git directories; Claude uses its auto permission mode. CLI authentication is reused, while hooks and unrelated MCP integrations are disabled. Agent permissions and organization policy govern execution, rather than a fixed tidygit command allowlist. Use a current CLI and account supporting these modes; refusal or unsupported flags leave the failure unresolved.
 
-Repair transcripts are saved under `${XDG_STATE_HOME:-~/.local/state}/tidygit/repairs`. Use `--agent-timeout 10m` to override the five-minute agent timeout independently of Git/GitHub command timeouts.
+Repair transcripts are saved under `${XDG_STATE_HOME:-~/.local/state}/tidygit/repairs`; this location must be outside the repository's worktrees. Use `--agent-timeout 10m` to override the five-minute agent timeout independently of Git/GitHub command timeouts. Repairs happen in place: a failed or interrupted attempt can leave changes, which tidygit does not automatically roll back.
 
 ## Shell aliases
 
