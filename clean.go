@@ -272,6 +272,9 @@ func cleanRepository(ctx context.Context, r repository, opts options) (result re
 			reason = "explicitly retained by tidygit.keep"
 		}
 		b, hasBranch := branchByName[wt.Branch]
+		if reason == "" && wt.Branch != "" && !hasBranch {
+			reason = "branch name does not match local refs; keeping worktree"
+		}
 		if reason == "" && activeOperation != "" {
 			reason = activeOperation
 		}
@@ -463,13 +466,9 @@ func cleanRepository(ctx context.Context, r repository, opts options) (result re
 			}
 		}
 	}
-	checkedOut := map[string]bool{}
 	remaining, err := r.worktrees(ctx)
 	if err != nil {
 		return fail("checking remaining worktrees", err)
-	}
-	for _, wt := range remaining {
-		checkedOut[wt.Branch] = true
 	}
 	for _, b := range candidates {
 		if handled[b.Name] {
@@ -485,7 +484,11 @@ func cleanRepository(ctx context.Context, r repository, opts options) (result re
 		}
 		reason := ""
 		stale := false
-		if checkedOut[b.Name] {
+		checkedOut, err := r.checkedOutWorktree(b.Name, remaining)
+		if err != nil {
+			return fail("checking branch ownership", err)
+		}
+		if checkedOut != "" {
 			reason = "checked out in a retained worktree"
 		} else if kept[b.Name] {
 			reason = "explicitly retained by tidygit.keep"

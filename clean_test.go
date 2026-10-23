@@ -166,6 +166,33 @@ fi
 	f.assertBranch("feature", true)
 }
 
+func TestCleanupRetainsCaseAliasedNamedWorktree(t *testing.T) {
+	f, path, name, oid := caseAliasedWorktree(t)
+	f.pullRequests("MERGED", map[string]string{name: oid})
+	opts := defaultOptions()
+	opts.Auto, opts.StaleDays = true, 0
+	opts.DryRun = true
+	preview, err := clean(t.Context(), f.repo, opts)
+	if err != nil || len(preview.Errors) != 0 || preview.WorktreesPlanned != 0 || preview.BranchesPlanned != 0 {
+		t.Fatalf("dry run planned removal of a named worktree with an aliased ref: %+v, %v", preview, err)
+	}
+	opts.DryRun = false
+	result, err := clean(t.Context(), f.repo, opts)
+	if err != nil || len(result.Errors) != 0 || result.WorktreesRemoved != 0 || result.BranchesDeleted != 0 {
+		t.Fatalf("cleanup changed a named worktree with an aliased ref: %+v, %v", result, err)
+	}
+	f.assertBranch(name, true)
+	if _, err := os.Stat(filepath.Join(path, "tracked")); err != nil {
+		t.Fatalf("worktree was removed: %v", err)
+	}
+	if got := f.run(path, "symbolic-ref", "HEAD"); got != "refs/heads/INFRA-5953/foo" {
+		t.Fatalf("worktree HEAD spelling changed: %s", got)
+	}
+	if got := f.run(path, "rev-parse", "HEAD"); got != oid {
+		t.Fatalf("worktree HEAD no longer resolves: got %s want %s", got, oid)
+	}
+}
+
 func TestAutoPreservesDirtyAndNewerWork(t *testing.T) {
 	for _, state := range []string{"MERGED", "CLOSED"} {
 		t.Run(state, func(t *testing.T) {
