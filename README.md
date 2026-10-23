@@ -66,7 +66,7 @@ tidygit --auto --fix
 
 `--fix` allows one agent repair attempt per repository when default-branch detection, fetching, or the initial PR lookup fails. The agent proposes a retry or pruning stale remote-tracking refs for a conventional fetch mapping. Tidygit validates the action, executes it, and reruns its checks before reporting success. History rewrites, conflict resolution, and bypassing cleanup protections are outside this mode; `--dry-run` never invokes the agent.
 
-The selected provider receives failure messages, the repository path, Git status, and eligible remote names. Diagnosis reuses CLI authentication with command execution, hooks, and integrations disabled; user customizations are not loaded. Use a current CLI supporting the required isolation and structured-output flags; unsupported flags leave the original failure unresolved.
+The selected provider receives failure messages, the repository path, Git status, and eligible remote names. Diagnosis reuses CLI authentication and requests restricted execution with user customizations disabled. Codex checks its effective MCP inventory and refuses diagnosis if integrations cannot be disabled; Claude denies MCP tools. Organization-enforced CLI policy still applies. Use a current CLI supporting the required isolation and structured-output flags; unsupported flags leave the original failure unresolved.
 
 Repair transcripts are saved under `${XDG_STATE_HOME:-~/.local/state}/tidygit/repairs`. Use `--agent-timeout 10m` to override the five-minute agent timeout independently of Git/GitHub command timeouts.
 

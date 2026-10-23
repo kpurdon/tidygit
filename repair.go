@@ -192,25 +192,107 @@ func newRepairDirectory() (string, error) {
 	return os.MkdirTemp(base, "attempt-")
 }
 
-// The agent diagnoses supplied evidence; only tidygit executes the validated action.
+// The agent supplies a plan; tidygit validates it before executing fixed Git actions.
 func repairAgentCommand(ctx context.Context, agent, dir string) *exec.Cmd {
 	var args []string
 	if agent == "codex" {
 		args = []string{"exec", "--ignore-user-config", "--sandbox", "read-only", "--skip-git-repo-check", "--ephemeral", "--color", "never",
-			"-c", "approval_policy=\"never\"", "-c", "web_search=\"disabled\"",
+			"-c", "approval_policy=\"never\"", "-c", "web_search=\"disabled\"", "-c", "project_root_markers=[]", "-c", "notify=[]",
 			"--output-schema", filepath.Join(dir, "schema.json"), "--output-last-message", filepath.Join(dir, "response.json")}
 		for _, feature := range []string{"shell_tool", "unified_exec", "apply_patch_freeform", "apps", "plugins", "hooks", "multi_agent", "multi_agent_v2", "computer_use", "image_generation"} {
 			args = append(args, "-c", "features."+feature+"=false")
 		}
 		args = append(args, "-")
 	} else {
-		args = []string{"-p", "--tools", "", "--strict-mcp-config", "--mcp-config", `{"mcpServers":{}}`, "--setting-sources", "", "--settings", `{"disableAllHooks":true}`,
+		args = []string{"-p", "--tools", "", "--disallowedTools", "mcp__*", "--strict-mcp-config", "--mcp-config", `{"mcpServers":{}}`, "--setting-sources", "", "--settings", `{"disableAllHooks":true}`,
 			"--no-session-persistence", "--output-format", "json", "--json-schema", repairSchema}
 	}
 	cmd := exec.CommandContext(ctx, agent, args...)
 	cmd.Dir = dir
 	cmd.WaitDelay = 2 * time.Second
 	return cmd
+}
+
+type codexMCPServer struct {
+	Name      string `json:"name"`
+	Enabled   *bool  `json:"enabled"`
+	Transport struct {
+		Type string `json:"type"`
+	} `json:"transport"`
+}
+
+// Listing includes user configuration as a conservative superset of exec's
+// --ignore-user-config mode. Disable every name, including already-disabled ones,
+// so ignoring a user override cannot expose an enabled system server. Both commands
+// use the new attempt directory as their project root to exclude ancestor config.
+func restrictCodexMCP(ctx context.Context, cmd *exec.Cmd, diagnostics io.Writer) error {
+	listArgs := []string{"mcp", "list", "--json"}
+	for i := 1; i < len(cmd.Args); i++ {
+		if cmd.Args[i] == "-c" && i+1 < len(cmd.Args) {
+			listArgs = append(listArgs, "-c", cmd.Args[i+1])
+			i++
+		}
+	}
+	list := func(args []string) ([]codexMCPServer, error) {
+		var servers []codexMCPServer
+		probe := exec.CommandContext(ctx, cmd.Path, args...)
+		probe.Dir, probe.WaitDelay = cmd.Dir, cmd.WaitDelay
+		var output bytes.Buffer
+		probe.Stdout = &repairOutput{writer: &output, remaining: 1 << 20}
+		probe.Stderr = diagnostics
+		if err := probe.Run(); err != nil {
+			return nil, fmt.Errorf("inspecting Codex MCP configuration: %w", err)
+		}
+		if err := json.Unmarshal(output.Bytes(), &servers); err != nil {
+			return nil, fmt.Errorf("invalid Codex MCP inventory: %w", err)
+		}
+		if servers == nil {
+			return nil, errors.New("missing Codex MCP inventory")
+		}
+		for _, server := range servers {
+			if server.Name == "" || server.Enabled == nil {
+				return nil, errors.New("incomplete Codex MCP inventory")
+			}
+		}
+		return servers, nil
+	}
+	servers, err := list(listArgs)
+	if err != nil {
+		return err
+	}
+	for _, server := range servers {
+		// Codex -c paths split on dots without TOML quoted-key handling.
+		if strings.ContainsFunc(server.Name, func(r rune) bool {
+			return !(r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '_' || r == '-')
+		}) {
+			return fmt.Errorf("cannot safely override Codex MCP server name %q", server.Name)
+		}
+		prefix := "mcp_servers." + server.Name
+		// A disabled server still needs a valid transport when exec ignores the
+		// user config that originally defined it. Do not copy credentials or commands.
+		transport := ""
+		switch server.Transport.Type {
+		case "stdio":
+			transport = prefix + ".command=\"tidygit-disabled-mcp\""
+		case "streamable_http":
+			transport = prefix + ".url=\"http://127.0.0.1:1\""
+		default:
+			return fmt.Errorf("unsupported Codex MCP transport for %q", server.Name)
+		}
+		overrides := []string{"-c", prefix + ".enabled=false", "-c", transport}
+		listArgs = append(listArgs, overrides...)
+		cmd.Args = append(cmd.Args, overrides...)
+	}
+	verified, err := list(listArgs)
+	if err != nil {
+		return err
+	}
+	for _, server := range verified {
+		if *server.Enabled {
+			return fmt.Errorf("Codex MCP server %q could not be disabled; no diagnosis started", server.Name)
+		}
+	}
+	return nil
 }
 
 func runRepairAgent(ctx context.Context, agent, dir, prompt string, timeout time.Duration) (repairPlan, error) {
@@ -237,6 +319,14 @@ func runRepairAgent(ctx context.Context, agent, dir, prompt string, timeout time
 	var response bytes.Buffer
 	cmd.Stdout = &repairOutput{writer: io.MultiWriter(stdout, &response), remaining: 1 << 20}
 	cmd.Stderr = &repairOutput{writer: stderr, remaining: 1 << 20}
+	if agent == "codex" {
+		if err := restrictCodexMCP(ctx, cmd, cmd.Stderr); err != nil {
+			if ctx.Err() != nil {
+				return plan, ctx.Err()
+			}
+			return plan, err
+		}
+	}
 	if err := cmd.Run(); err != nil {
 		if ctx.Err() != nil {
 			return plan, fmt.Errorf("%s: %w", agent, ctx.Err())

@@ -19,6 +19,7 @@ func repairFixture(t *testing.T, agent, action, failure string) (*cleanupFixture
 	t.Setenv("TEST_FETCH_FAILURE", failure)
 	t.Setenv("TEST_REPAIR_AGENT", agent)
 	t.Setenv("TEST_REPAIR_PLAN", action)
+	t.Setenv("TEST_REPAIR_MCP", "")
 	bin := filepath.Join(f.root, "bin")
 	f.write(filepath.Join(bin, "git"), `#!/bin/sh
 if [ "$1" = remote ] && [ "$2" = get-url ]; then exec "$TEST_REAL_GIT" config --get "remote.$3.url"; fi
@@ -34,6 +35,34 @@ fi
 exec "$TEST_REAL_GIT" "$@"
 `)
 	f.write(filepath.Join(bin, agent), `#!/bin/sh
+disabled=false
+transport=false
+isolated=false
+notify=false
+for arg in "$@"; do
+  if [ "$arg" = 'project_root_markers=[]' ]; then isolated=true; fi
+  if [ "$arg" = 'notify=[]' ]; then notify=true; fi
+  if [ "$arg" = 'mcp_servers.tools_remote.enabled=false' ]; then disabled=true; fi
+  if [ "$TEST_REPAIR_MCP" = http ]; then
+    if [ "$arg" = 'mcp_servers.tools_remote.url="http://127.0.0.1:1"' ]; then transport=true; fi
+  elif [ "$arg" = 'mcp_servers.tools_remote.command="tidygit-disabled-mcp"' ]; then transport=true
+  fi
+done
+if [ "$TEST_REPAIR_AGENT" = codex ] && { [ "$isolated" != true ] || [ "$notify" != true ]; }; then exit 8; fi
+if [ "$1" = mcp ]; then
+  case "$TEST_REPAIR_MCP" in
+    enabled) printf '[{"name":"tools_remote","enabled":%s,"transport":{"type":"stdio"}}]\n' "$([ "$disabled" = true ] && echo false || echo true)" ;;
+    http) printf '[{"name":"tools_remote","enabled":%s,"transport":{"type":"streamable_http"}}]\n' "$([ "$disabled" = true ] && echo false || echo true)" ;;
+    disabled) printf '[{"name":"tools_remote","enabled":false,"transport":{"type":"stdio"}}]\n' ;;
+    managed) printf '[{"name":"tools_remote","enabled":true,"transport":{"type":"stdio"}}]\n' ;;
+    unsupported) printf '[{"name":"tools.remote","enabled":true,"transport":{"type":"stdio"}}]\n' ;;
+    malformed) printf 'not json\n' ;;
+    null) printf 'null\n' ;;
+    *) printf '[]\n' ;;
+  esac
+  exit 0
+fi
+if [ -n "$TEST_REPAIR_MCP" ] && { [ "$disabled" != true ] || [ "$transport" != true ]; }; then exit 7; fi
 echo agent >> "$TEST_REPAIR_CALLS"
 cat >/dev/null
 if [ -n "$TEST_REPAIR_MUTATE" ]; then printf 'concurrent edit\n' > "$TEST_REPAIR_MUTATE"; fi
@@ -73,6 +102,24 @@ func repairCallCount(t *testing.T, env string) int {
 }
 
 const retryPlan = `{"action":"retry","remote":"","reason":"Transient fetch failure"}`
+
+func TestRepairCodexMCPRestrictions(t *testing.T) {
+	for _, inventory := range []string{"enabled", "disabled", "http", "managed", "malformed", "unsupported", "null"} {
+		t.Run(inventory, func(t *testing.T) {
+			_, _ = repairFixture(t, "codex", retryPlan, "")
+			t.Setenv("TEST_REPAIR_MCP", inventory)
+			plan, err := runRepairAgent(t.Context(), "codex", t.TempDir(), "diagnose", time.Second)
+			blocked := inventory == "managed" || inventory == "malformed" || inventory == "unsupported" || inventory == "null"
+			if blocked {
+				if err == nil || repairCallCount(t, "TEST_REPAIR_CALLS") != 0 {
+					t.Fatalf("unsafe MCP inventory started diagnosis: %v", err)
+				}
+			} else if err != nil || plan.Action != "retry" || repairCallCount(t, "TEST_REPAIR_CALLS") != 1 {
+				t.Fatalf("MCP override missing from diagnosis: %+v, %v", plan, err)
+			}
+		})
+	}
+}
 
 func TestRepairRetryProvidersAndMarker(t *testing.T) {
 	for _, agent := range []string{"codex", "claude"} {
