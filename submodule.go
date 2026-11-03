@@ -171,6 +171,7 @@ func (r repository) submoduleRecoveryPlan(ctx context.Context, wt Worktree) (sub
 			return plan, err
 		}
 	}
+	checkedStorage := map[string]bool{}
 	err := filepath.WalkDir(root, func(path string, entry fs.DirEntry, err error) error {
 		if err != nil {
 			return err
@@ -189,9 +190,40 @@ func (r repository) submoduleRecoveryPlan(ctx context.Context, wt Worktree) (sub
 				return filepath.SkipDir
 			}
 		}
+		// Bare repositories have no .git entry and may have any directory name.
+		switch strings.ToLower(entry.Name()) {
+		case "head", "objects", "refs", "packed-refs":
+			parent := filepath.Dir(path)
+			if !checkedStorage[parent] {
+				checkedStorage[parent] = true
+				if nested, err := possibleBareGitStorage(parent); err != nil {
+					return err
+				} else if nested {
+					return fmt.Errorf("nested Git storage %q requires separate recovery", parent)
+				}
+			}
+		}
 		return nil
 	})
 	return plan, err
+}
+
+func possibleBareGitStorage(path string) (bool, error) {
+	markers := 0
+	for _, name := range []string{"HEAD", "objects", "refs", "packed-refs", "config"} {
+		if _, err := os.Lstat(filepath.Join(path, name)); errors.Is(err, os.ErrNotExist) {
+			continue
+		} else if err != nil {
+			return false, err
+		}
+		// Partial or malformed storage still needs manual recovery. Lstat avoids
+		// following symlinked markers into an external object store.
+		markers++
+		if markers >= 2 {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 func (r repository) checkSubmoduleStorage(ctx context.Context, gitDir string) error {

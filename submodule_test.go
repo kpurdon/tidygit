@@ -8,6 +8,68 @@ import (
 	"testing"
 )
 
+func TestCompletedWorktreeKeepsNestedBareRepository(t *testing.T) {
+	for _, mode := range []string{"backup.git", "backup", "missing HEAD"} {
+		t.Run(mode, func(t *testing.T) {
+			f := newCleanupFixture(t)
+			f.write(filepath.Join(f.dir, ".gitignore"), "backup*/\n")
+			f.run(f.dir, "commit", "-am", "ignore backup directory")
+			f.run(f.dir, "push")
+			path := filepath.Join(f.root, "completed")
+			oid := f.branch("completed", path)
+			name := mode
+			if mode == "missing HEAD" {
+				name = "backup"
+			}
+			bare := filepath.Join(path, name)
+			f.run(path, "clone", "--bare", "--no-local", f.dir, bare)
+			tree := f.run(f.dir, "rev-parse", "HEAD^{tree}")
+			unique := f.run(path, "--git-dir", bare, "commit-tree", tree, "-p", oid, "-m", "unique recovery history")
+			f.run(path, "--git-dir", bare, "update-ref", "refs/heads/recovery", unique)
+			if mode == "missing HEAD" {
+				if err := os.Remove(filepath.Join(bare, "HEAD")); err != nil {
+					t.Fatal(err)
+				}
+			}
+			f.pullRequests("MERGED", map[string]string{"completed": oid})
+			result := cleanFixture(t, f, false)
+			if result.WorktreesRemoved != 0 || result.BranchesDeleted != 0 || len(result.Archives) != 0 {
+				t.Fatalf("nested bare recovery history was discarded: %+v", result)
+			}
+			f.assertBranch("completed", true)
+			if mode == "missing HEAD" {
+				f.write(filepath.Join(bare, "HEAD"), "ref: refs/heads/main\n")
+			}
+			if got := f.run(path, "--git-dir", bare, "rev-parse", "recovery"); got != unique {
+				t.Fatalf("nested recovery ref changed: %s", got)
+			}
+			if got := f.run(path, "--git-dir", bare, "cat-file", "-t", unique); got != "commit" {
+				t.Fatalf("nested recovery commit missing: %s", got)
+			}
+		})
+	}
+}
+
+func TestCompletedWorktreeDiscardsOrdinaryIgnoredDirectory(t *testing.T) {
+	f := newCleanupFixture(t)
+	path := filepath.Join(f.root, "completed")
+	oid := f.branch("completed", path)
+	ignored := filepath.Join(path, "ignored")
+	if err := os.Mkdir(ignored, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	f.write(filepath.Join(ignored, "HEAD"), "ordinary application data\n")
+	f.write(filepath.Join(ignored, "cache"), "disposable bytes\n")
+	f.pullRequests("MERGED", map[string]string{"completed": oid})
+	result := cleanFixture(t, f, false)
+	if result.WorktreesRemoved != 1 || result.BranchesDeleted != 1 || len(result.Archives) != 0 {
+		t.Fatalf("ordinary ignored directory prevented cleanup: %+v", result)
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("completed checkout remains: %v", err)
+	}
+}
+
 func TestArchivePreservesOwnedSubmoduleHistoryAndFiles(t *testing.T) {
 	if runtime.GOOS != "darwin" && runtime.GOOS != "linux" {
 		t.Skip("safe directory relocation unsupported")

@@ -1,6 +1,8 @@
 package main
 
 import (
+	"crypto/sha256"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -82,5 +84,126 @@ func TestCompletedRecoverableSubmoduleWorktreeRemovedWithoutArchive(t *testing.T
 	}
 	if _, err := os.Stat(filepath.Join(f.dir, "child", "tracked")); err != nil {
 		t.Fatalf("primary child changed: %v", err)
+	}
+}
+
+func TestDisposableWorktreePreservesChildLFSPayload(t *testing.T) {
+	f, wt, child := disposableSubmoduleFixture(t)
+	payload := "unpublished large object\n"
+	digest := fmt.Sprintf("%x", sha256.Sum256([]byte(payload)))
+	f.write(filepath.Join(child, "tracked"), fmt.Sprintf("version https://git-lfs.github.com/spec/v1\noid sha256:%s\nsize %d\n", digest, len(payload)))
+	f.run(child, "commit", "-am", "published LFS pointer")
+	f.run(child, "push", "origin", "HEAD:refs/heads/lfs-pointer")
+	f.run(wt.Path, "add", "child")
+	f.run(wt.Path, "commit", "-m", "record pointer commit")
+	wt.OID = f.run(wt.Path, "rev-parse", "HEAD")
+	admin := f.run(child, "rev-parse", "--absolute-git-dir")
+	object := filepath.Join(admin, "lfs", "objects", digest[:2], digest[2:4], digest)
+	if err := os.MkdirAll(filepath.Dir(object), 0700); err != nil {
+		t.Fatal(err)
+	}
+	f.write(object, payload)
+	if err := f.repo.removeDisposableWorktree(t.Context(), wt, Branch{Name: wt.Branch, OID: wt.OID}, true); err == nil {
+		t.Fatal("removed checkout containing an unpublished LFS payload")
+	}
+	if data, err := os.ReadFile(object); err != nil || string(data) != payload {
+		t.Fatalf("LFS payload changed: %q, %v", data, err)
+	}
+}
+
+func TestDisposableWorktreeRechecksEarlierChildHistory(t *testing.T) {
+	for _, mutation := range []string{"commit-reset", "stash", "custom-ref"} {
+		t.Run(mutation, func(t *testing.T) {
+			f, wt, _ := disposableSubmoduleFixture(t)
+			f.run(wt.Path, "-c", "protocol.file.allow=always", "submodule", "add", f.bare, "other")
+			f.run(wt.Path, "commit", "-am", "record second child")
+			wt.OID = f.run(wt.Path, "rev-parse", "HEAD")
+			first := filepath.Join(f.root, "first-remote")
+			done := filepath.Join(f.root, "mutated")
+			t.Setenv("TEST_FIRST_REMOTE", first)
+			t.Setenv("TEST_REMOTE_MUTATED", done)
+			t.Setenv("TEST_CHILD_MUTATION", mutation)
+			f.write(filepath.Join(f.root, "bin", "git"), `#!/bin/sh
+case " $* " in
+  *" ls-remote "*)
+    if [ ! -f "$TEST_FIRST_REMOTE" ]; then
+      printf '%s' "$PWD" > "$TEST_FIRST_REMOTE"
+    elif [ ! -f "$TEST_REMOTE_MUTATED" ]; then
+      first=$(cat "$TEST_FIRST_REMOTE")
+      initial=$("$TEST_REAL_GIT" -C "$first" rev-parse HEAD)
+      case "$TEST_CHILD_MUTATION" in
+        commit-reset)
+          "$TEST_REAL_GIT" -C "$first" commit --allow-empty -m 'concurrent child history' >/dev/null || exit 1
+          "$TEST_REAL_GIT" -C "$first" reset --hard "$initial" >/dev/null || exit 1
+          ;;
+        stash)
+          printf 'concurrent child bytes\n' > "$first/tracked"
+          "$TEST_REAL_GIT" -C "$first" stash push >/dev/null || exit 1
+          ;;
+        custom-ref)
+          "$TEST_REAL_GIT" -C "$first" update-ref refs/preserved/concurrent "$initial" || exit 1
+          ;;
+      esac
+      : > "$TEST_REMOTE_MUTATED"
+    fi
+    ;;
+esac
+exec "$TEST_REAL_GIT" "$@"
+`)
+			if err := f.repo.removeDisposableWorktree(t.Context(), wt, Branch{Name: wt.Branch, OID: wt.OID}, true); err == nil {
+				t.Fatal("removed checkout after earlier child history changed during remote proof")
+			}
+			if _, err := os.Stat(done); err != nil {
+				t.Fatalf("concurrent mutation did not run: %v", err)
+			}
+			for _, name := range []string{"tracked", "child/tracked", "other/tracked"} {
+				if got, err := os.ReadFile(filepath.Join(wt.Path, name)); err != nil || string(got) != "base\n" {
+					t.Fatalf("source changed before all proof checks passed: %s %q %v", name, got, err)
+				}
+			}
+		})
+	}
+}
+
+func TestDisposableWorktreeIgnoresFsmonitorCache(t *testing.T) {
+	f, wt, _ := disposableSubmoduleFixture(t)
+	hook := filepath.Join(f.root, "fsmonitor")
+	f.write(hook, "#!/bin/sh\nprintf 'unchanged-token\\0'\n")
+	if err := os.Chmod(hook, 0755); err != nil {
+		t.Fatal(err)
+	}
+	f.run(wt.Path, "config", "core.fsmonitor", hook)
+	f.run(wt.Path, "update-index", "--fsmonitor")
+	f.run(wt.Path, "status", "--porcelain")
+	f.run(wt.Path, "update-index", "--fsmonitor-valid", "tracked")
+	f.write(filepath.Join(wt.Path, "tracked"), "source hidden by stale fsmonitor\n")
+	if got := f.run(wt.Path, "status", "--porcelain"); got != "" {
+		t.Fatalf("fixture did not hide source changes: %s", got)
+	}
+	if err := f.repo.removeDisposableWorktree(t.Context(), wt, Branch{Name: wt.Branch, OID: wt.OID}, true); err == nil {
+		t.Fatal("removed checkout with source hidden by fsmonitor")
+	}
+	if got, err := os.ReadFile(filepath.Join(wt.Path, "tracked")); err != nil || string(got) != "source hidden by stale fsmonitor\n" {
+		t.Fatalf("source data changed: %q, %v", got, err)
+	}
+}
+
+func TestDisposableWorktreeRechecksParentIndexVisibility(t *testing.T) {
+	f, wt, _ := disposableSubmoduleFixture(t)
+	t.Setenv("TEST_PARENT_CHECKOUT", wt.Path)
+	f.write(filepath.Join(f.root, "bin", "git"), `#!/bin/sh
+case " $* " in
+  *" ls-remote "*)
+    "$TEST_REAL_GIT" -C "$TEST_PARENT_CHECKOUT" update-index --assume-unchanged tracked || exit 1
+    printf 'new hidden source\n' > "$TEST_PARENT_CHECKOUT/tracked"
+    ;;
+esac
+exec "$TEST_REAL_GIT" "$@"
+`)
+	if err := f.repo.removeDisposableWorktree(t.Context(), wt, Branch{Name: wt.Branch, OID: wt.OID}, true); err == nil {
+		t.Fatal("removed checkout after parent index began hiding source changes")
+	}
+	if got, err := os.ReadFile(filepath.Join(wt.Path, "tracked")); err != nil || string(got) != "new hidden source\n" {
+		t.Fatalf("source data changed: %q, %v", got, err)
 	}
 }
