@@ -83,6 +83,17 @@ func TestDeleteBranchRefusesCaseAliasedWorktree(t *testing.T) {
 	if got := f.run(path, "rev-parse", "HEAD"); got != oid {
 		t.Fatalf("worktree HEAD changed: got %s want %s", got, oid)
 	}
+	f.run(path, "checkout", "--detach")
+	state := f.run(path, "rev-parse", "--path-format=absolute", "--git-path", "rebase-merge")
+	if err := os.Mkdir(state, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	f.write(filepath.Join(state, "head-name"), "refs/heads/INFRA-5953/foo\n")
+	deleted, err = f.repo.deleteBranch(t.Context(), Branch{Name: name, OID: oid})
+	if deleted || err == nil {
+		t.Fatalf("deleted detached rebase branch through a loose-ref alias: deleted=%v err=%v", deleted, err)
+	}
+	f.assertBranch(name, true)
 }
 
 func TestDeleteBranchKeepsCaseDistinctPackedRefsIndependent(t *testing.T) {
@@ -191,6 +202,81 @@ func TestDeleteBranchPreservesDetachedRebaseWork(t *testing.T) {
 	state := f.run(path, "rev-parse", "--path-format=absolute", "--git-path", "rebase-merge")
 	if _, err := os.Stat(state); err != nil {
 		t.Fatalf("rebase state missing: %v", err)
+	}
+	protected := map[string]string{}
+	for _, name := range []string{"scheduled", "pending", "finished-step", "unrelated"} {
+		protected[name] = f.branch(name, "")
+	}
+	f.write(filepath.Join(state, "update-refs"), "refs/heads/scheduled\n"+protected["scheduled"]+"\n"+strings.Repeat("0", 40)+"\n")
+	f.write(filepath.Join(state, "git-rebase-todo"), "update-ref refs/heads/pending\n")
+	f.write(filepath.Join(state, "done"), "u refs/heads/finished-step\n")
+	for name, tip := range protected {
+		deleted, err := f.repo.deleteBranch(t.Context(), Branch{Name: name, OID: tip})
+		if name == "unrelated" {
+			if !deleted || err != nil {
+				t.Fatalf("rebase blocked unrelated branch: deleted=%v err=%v", deleted, err)
+			}
+		} else if deleted || err == nil {
+			t.Fatalf("rebase update-ref branch %s lost: deleted=%v err=%v", name, deleted, err)
+		}
+		f.assertBranch(name, name != "unrelated")
+	}
+}
+
+func TestOperationProtectionRefreshesBeforeWorktreeRemoval(t *testing.T) {
+	f := newCleanupFixture(t)
+	path := filepath.Join(f.root, "finished")
+	oid := f.branch("finished", path)
+	wt := Worktree{Path: path, Branch: "finished", OID: oid}
+	b := Branch{Name: "finished", OID: oid}
+	if err := f.repo.checkWorktreeIdentity(t.Context(), wt, b, true); err != nil {
+		t.Fatal(err)
+	}
+	active := filepath.Join(f.root, "rebasing")
+	f.branch("rebasing", active)
+	f.run(active, "checkout", "--detach")
+	state := f.run(active, "rev-parse", "--path-format=absolute", "--git-path", "rebase-merge")
+	if err := os.Mkdir(state, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	f.write(filepath.Join(state, "head-name"), "refs/heads/rebasing\n")
+	f.write(filepath.Join(state, "git-rebase-todo"), "update-ref refs/heads/finished\n")
+	if err := f.repo.removeWorktree(t.Context(), wt, b, true); err == nil {
+		t.Fatal("removed a worktree newly targeted by another rebase")
+	}
+	f.assertBranch("finished", true)
+	if _, err := os.Stat(filepath.Join(path, "tracked")); err != nil {
+		t.Fatalf("protected worktree lost: %v", err)
+	}
+}
+
+func TestDeleteBranchPreservesDetachedBisectAndMalformedOperation(t *testing.T) {
+	for _, mode := range []string{"bisect", "malformed rebase"} {
+		t.Run(mode, func(t *testing.T) {
+			f := newCleanupFixture(t)
+			path := filepath.Join(f.root, "active")
+			oid := f.branch("active", path)
+			target := "active"
+			f.run(path, "checkout", "--detach")
+			admin := f.run(path, "rev-parse", "--absolute-git-dir")
+			if mode == "bisect" {
+				f.write(filepath.Join(admin, "BISECT_START"), "active\n")
+			} else {
+				target = "unrelated"
+				oid = f.branch(target, "")
+				state := filepath.Join(admin, "rebase-merge")
+				if err := os.Mkdir(state, 0o700); err != nil {
+					t.Fatal(err)
+				}
+				f.write(filepath.Join(state, "head-name"), "refs/heads/active\n")
+				f.write(filepath.Join(state, "update-refs"), "refs/heads/unknown\ntruncated\n")
+			}
+			deleted, err := f.repo.deleteBranch(t.Context(), Branch{Name: target, OID: oid})
+			if deleted || err == nil {
+				t.Fatalf("operation branch lost: deleted=%v err=%v", deleted, err)
+			}
+			f.assertBranch(target, true)
+		})
 	}
 }
 

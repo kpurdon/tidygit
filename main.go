@@ -34,7 +34,7 @@ const usage = `Usage: tidygit [options] [all [dir]]
 
 Tidy the current repository or immediate repositories in a directory.
 
-  --auto                  Clean up eligible work without prompting
+  --auto                  Remove completed work, including ignored files; never prompt
   --archive               Allow recovery archives before removing local work
   --dry-run               Show proposed cleanup without changing repositories
   --force                 Recheck unchanged repositories; keep all deletion safeguards

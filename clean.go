@@ -192,7 +192,7 @@ func cleanRepository(ctx context.Context, r repository, opts options) (result re
 	}
 	var removedBranches []Branch
 	var removedWorktrees []Worktree
-	activeOperation, err := r.worktreeOperation(ctx, worktrees)
+	operations, err := r.operationProtection(ctx, worktrees)
 	if err != nil {
 		return fail("checking linked worktree operations", err)
 	}
@@ -275,8 +275,14 @@ func cleanRepository(ctx context.Context, r repository, opts options) (result re
 		if reason == "" && wt.Branch != "" && !hasBranch {
 			reason = "branch name does not match local refs; keeping worktree"
 		}
-		if reason == "" && activeOperation != "" {
-			reason = activeOperation
+		if reason == "" {
+			reason = operations.worktrees[canonicalPath(wt.Path)]
+		}
+		if reason == "" && hasBranch {
+			reason, err = operations.branchReason(r, b.Name)
+			if err != nil {
+				return fail("checking operation branch ownership", err)
+			}
 		}
 		complete, archiveAll, stale := false, false, false
 		if reason == "" {
@@ -297,6 +303,7 @@ func cleanRepository(ctx context.Context, r repository, opts options) (result re
 			reason = "pull request is still open"
 		}
 		var ignored []string
+		disposable := false
 		if reason == "" {
 			status, statusErr := r.status(ctx, wt.Path, false)
 			if statusErr != nil {
@@ -321,7 +328,14 @@ func cleanRepository(ctx context.Context, r repository, opts options) (result re
 			}
 		}
 
-		if reason == "" {
+		if reason == "" && complete && !stale && !archiveAll && !opts.Archive {
+			if _, err := r.disposableWorktree(ctx, wt, b, hasBranch); err != nil {
+				reason = "completed worktree needs preservation: " + err.Error()
+			} else {
+				disposable = true
+			}
+		}
+		if reason == "" && !disposable {
 			hasSubmodules, policyErr := r.submoduleArchivePolicy(ctx, wt)
 			if policyErr != nil {
 				reason = "submodule or nested repository needs manual cleanup: " + policyErr.Error()
@@ -333,7 +347,7 @@ func cleanRepository(ctx context.Context, r repository, opts options) (result re
 				}
 			}
 		}
-		if reason == "" && !archiveAll {
+		if reason == "" && !archiveAll && !disposable {
 			var err error
 			ignored, err = ignoredPaths(ctx, r, wt.Path)
 			if err != nil {
@@ -369,6 +383,9 @@ func cleanRepository(ctx context.Context, r repository, opts options) (result re
 			uiAction("STALE", fmt.Sprintf("inactive for at least %d days; archiving before removal", opts.StaleDays))
 		}
 		if opts.DryRun {
+			if disposable {
+				uiAction("WOULD DISCARD", "ignored files in the completed worktree")
+			}
 			if archiveAll {
 				uiAction("WOULD ARCHIVE", "complete worktree, staging, and Git history")
 			} else if len(ignored) > 0 {
@@ -386,6 +403,12 @@ func cleanRepository(ctx context.Context, r repository, opts options) (result re
 		title := "Remove this clean worktree?"
 		if hasBranch {
 			title = "Remove this clean worktree and delete its branch?"
+		}
+		if disposable {
+			title = "Remove this completed worktree and discard its ignored files?"
+			if hasBranch {
+				title = "Remove this completed worktree, discard ignored files, and delete its branch?"
+			}
 		}
 		if len(ignored) > 0 {
 			title = "Archive ignored files, remove this worktree, and delete its branch?"
@@ -444,7 +467,13 @@ func cleanRepository(ctx context.Context, r repository, opts options) (result re
 			}
 		}
 		if !archiveAll {
-			if err := r.removeWorktree(ctx, wt, b, hasBranch); err != nil {
+			var err error
+			if disposable {
+				err = r.removeDisposableWorktree(ctx, wt, b, hasBranch)
+			} else {
+				err = r.removeWorktree(ctx, wt, b, hasBranch)
+			}
+			if err != nil {
 				result.addErr("removing worktree", err)
 				result.WorktreesSkipped++
 				keepBranch(wt.Branch)
@@ -491,12 +520,16 @@ func cleanRepository(ctx context.Context, r repository, opts options) (result re
 		if err != nil {
 			return fail("checking branch ownership", err)
 		}
+		operationReason, err := operations.branchReason(r, b.Name)
+		if err != nil {
+			return fail("checking operation branch ownership", err)
+		}
 		if checkedOut != "" {
 			reason = "checked out in a retained worktree"
 		} else if kept[b.Name] {
 			reason = "explicitly retained by tidygit.keep"
-		} else if activeOperation != "" {
-			reason = activeOperation
+		} else if operationReason != "" {
+			reason = operationReason
 		} else if pr.State == "OPEN" {
 			reason = "pull request is still open"
 		} else if cleanupKeepReason(pr, b) != "" {
@@ -638,6 +671,17 @@ func (r repository) checkWorktreeIdentity(ctx context.Context, wt Worktree, b Br
 	}
 	if !found {
 		return errors.New("worktree disappeared since discovery")
+	}
+	operations, err := r.operationProtection(ctx, fresh)
+	if err != nil {
+		return err
+	}
+	if hasBranch {
+		if reason, err := operations.branchReason(r, b.Name); err != nil {
+			return err
+		} else if reason != "" {
+			return fmt.Errorf("%s; keeping worktree", reason)
+		}
 	}
 	linked := r
 	linked.Dir = wt.Path
