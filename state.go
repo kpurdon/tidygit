@@ -66,7 +66,7 @@ func localSnapshot(ctx context.Context, r repository, opts options) (*localState
 func localSnapshotAt(ctx context.Context, r repository, opts options, now time.Time) (*localState, error) {
 	state := &localState{refs: map[string]stateRef{}, trees: map[string]string{}, branchAges: map[string]bool{}}
 	h := sha256.New()
-	fingerprintField(h, fmt.Sprintf("v%d:%s:%s:%t:%t:%d:%s:%d", cacheSemanticsVersion, canonicalPath(r.CommonDir), canonicalPath(r.ProtectedPath), opts.Auto, opts.Rebase, opts.PRLimit, opts.PRAuthor, opts.StaleDays))
+	fingerprintField(h, fmt.Sprintf("v%d:%s:%s:%t:%t:%d:%s:%d:%t", cacheSemanticsVersion, canonicalPath(r.CommonDir), canonicalPath(r.ProtectedPath), opts.Auto, opts.Rebase, opts.PRLimit, opts.PRAuthor, opts.StaleDays, opts.Archive))
 	raw, err := r.git(ctx, "for-each-ref", "--format=%(refname)%00%(objectname)%00%(symref)")
 	if err != nil {
 		return nil, err

@@ -17,13 +17,13 @@ import (
 var version = "dev"
 
 type options struct {
-	Auto, DryRun, Rebase, Force, Fix, Help, Version bool
-	PRLimit                                         int
-	PRAuthor                                        string
-	Timeout                                         time.Duration
-	AgentTimeout                                    time.Duration
-	Jobs                                            int
-	StaleDays                                       int
+	Auto, DryRun, Archive, Rebase, Force, Fix, Help, Version bool
+	PRLimit                                                  int
+	PRAuthor                                                 string
+	Timeout                                                  time.Duration
+	AgentTimeout                                             time.Duration
+	Jobs                                                     int
+	StaleDays                                                int
 }
 
 func defaultOptions() options {
@@ -34,11 +34,12 @@ const usage = `Usage: tidygit [options] [all [dir]]
 
 Tidy the current repository or immediate repositories in a directory.
 
-  --auto                  Clean up completed or archived stale work; never prompt
+  --auto                  Clean up eligible work without prompting
+  --archive               Allow recovery archives before removing local work
   --dry-run               Show proposed cleanup without changing repositories
   --force                 Recheck unchanged repositories; keep all deletion safeguards
   --fix                   Use the configured agent to repair operational failures
-  --stale-days N           Archive inactive work after N days (default 14; 0 disables)
+  --stale-days N           With --archive, archive inactive work after N days (default 14; 0 disables)
   --pr-limit N            PR lookup limit (default 100)
   --exclude-pr-filtering  Include all authors in the initial PR lookup
   --rebase                Rebase the default branch instead of fast-forward only
@@ -101,13 +102,15 @@ func parseArgs(args []string) (options, string, bool, error) {
 					opts.PRLimit = n
 				}
 			}
-		case "--auto", "--dry-run", "--rebase", "--force", "--fix", "--exclude-pr-filtering", "--version", "--help", "-h":
+		case "--auto", "--archive", "--dry-run", "--rebase", "--force", "--fix", "--exclude-pr-filtering", "--version", "--help", "-h":
 			if hasValue {
 				return opts, "", false, fmt.Errorf("%s does not accept a value", name)
 			}
 			switch name {
 			case "--auto":
 				opts.Auto = true
+			case "--archive":
+				opts.Archive = true
 			case "--dry-run":
 				opts.DryRun = true
 			case "--force":

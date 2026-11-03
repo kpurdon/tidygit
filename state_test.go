@@ -57,6 +57,8 @@ func TestLocalFingerprintInvalidation(t *testing.T) {
 	assertChanged()
 	opts.Auto = true
 	assertChanged()
+	opts.Archive = true
+	assertChanged()
 	opts.DryRun = true
 	if next := fingerprint(); next != previous {
 		t.Fatal("dry-run should inspect same marker")

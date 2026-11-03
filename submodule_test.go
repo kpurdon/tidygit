@@ -148,7 +148,15 @@ func TestCompletedSubmoduleCleanupArchivesIgnoredFilesAndKeepsDirtyChildren(t *t
 				f.write(filepath.Join(child, "tracked"), "active child work\n")
 			}
 			f.pullRequests("MERGED", map[string]string{"completed": oid})
-			result := cleanFixture(t, f, mode == "dry-run")
+			kept := cleanFixture(t, f, mode == "dry-run")
+			if kept.WorktreesRemoved != 0 || kept.BranchesDeleted != 0 || kept.WorktreesPlanned != 0 || len(kept.Archives) != 0 {
+				t.Fatalf("submodule recovery data changed without --archive: %+v", kept)
+			}
+			f.assertBranch("completed", true)
+			if got, err := os.ReadFile(filepath.Join(child, "ignored")); err != nil || string(got) != "child ignored data\n" {
+				t.Fatalf("retained child file changed: %q %v", got, err)
+			}
+			result := cleanFixtureWithArchives(t, f, mode == "dry-run")
 			if mode == "clean" {
 				if result.WorktreesRemoved != 1 || result.BranchesDeleted != 1 || len(result.Archives) != 1 {
 					t.Fatalf("clean submodule cleanup failed: %+v", result)

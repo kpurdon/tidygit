@@ -53,7 +53,14 @@ func TestDetachedSquashCompletionArchivesLocalHistory(t *testing.T) {
 	}
 	f.run(path, "reset", "--hard", tip)
 	f.write(filepath.Join(path, "ignored"), "local environment\n")
-	result := cleanFixture(t, f, false)
+	kept := cleanFixture(t, f, false)
+	if kept.WorktreesRemoved != 0 || len(kept.Archives) != 0 {
+		t.Fatalf("squash history changed without --archive: %+v", kept)
+	}
+	if got := f.run(path, "rev-parse", "HEAD"); got != tip {
+		t.Fatalf("retained detached history changed: %s", got)
+	}
+	result := cleanFixtureWithArchives(t, f, false)
 	if result.WorktreesRemoved != 1 || len(result.Archives) != 1 {
 		t.Fatalf("squash cleanup did not archive and remove: %+v", result)
 	}
