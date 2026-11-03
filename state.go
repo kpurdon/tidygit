@@ -42,7 +42,7 @@ func localFingerprintAt(ctx context.Context, r repository, opts options, now tim
 }
 
 // Bump when cleanup eligibility or fingerprint semantics change, not for UI builds.
-const cacheSemanticsVersion = 4
+const cacheSemanticsVersion = 5
 
 type stateRef struct{ OID, Symref string }
 type stateConfig struct {

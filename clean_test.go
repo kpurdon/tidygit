@@ -226,18 +226,20 @@ func TestAutoPreservesDirtyAndNewerWork(t *testing.T) {
 			f.pullRequests(state, prs)
 			r := cleanFixture(t, f, false)
 			checkCounts(t, r, 6)
-			if r.BranchesDeleted != 1 || r.WorktreesRemoved != 1 || len(r.Archives) != 0 {
+			if r.BranchesDeleted != 2 || r.WorktreesRemoved != 2 || len(r.Archives) != 0 {
 				t.Fatalf("unexpected deletions: %+v", r)
 			}
 			for name := range prs {
-				f.assertBranch(name, name != "clean")
-				if name != "clean" {
+				f.assertBranch(name, name != "clean" && name != "ignored")
+				if name != "clean" && name != "ignored" {
 					if _, err := os.Stat(filepath.Join(f.root, name)); err != nil {
 						t.Fatal(err)
 					}
 				}
 			}
 
+			f.branch("ignored", filepath.Join(f.root, "ignored"))
+			f.write(filepath.Join(f.root, "ignored", "ignored"), "keep me\n")
 			r = cleanFixtureWithArchives(t, f, false)
 			if r.BranchesDeleted != 1 || r.WorktreesRemoved != 1 {
 				t.Fatalf("explicit archival did not clean ignored worktree: %+v", r)
@@ -311,8 +313,8 @@ func TestDryRunDoesNotMutateRepository(t *testing.T) {
 	}
 	before := snapshot()
 	r := cleanFixture(t, f, true)
-	if r.BranchesPlanned != 0 || r.WorktreesPlanned != 0 || len(r.Archives) != 0 {
-		t.Fatalf("default preview planned archive-required removal: %+v", r)
+	if r.BranchesPlanned != 1 || r.WorktreesPlanned != 1 || len(r.Archives) != 0 {
+		t.Fatalf("default preview missed completed worktree removal: %+v", r)
 	}
 	if !reflect.DeepEqual(before, snapshot()) {
 		t.Fatal("default dry run changed repository files, index, or refs")
@@ -400,20 +402,32 @@ func TestCleanWorktreeWithOperationInProgressIsPreserved(t *testing.T) {
 		}
 		t.Run(name, func(t *testing.T) {
 			f := newCleanupFixture(t)
-			path := filepath.Join(f.root, "cherry-picking")
-			oid := f.branch("cherry-picking", path)
-			f.pullRequests("MERGED", map[string]string{"cherry-picking": oid})
-			state := f.run(path, "rev-parse", "--path-format=absolute", "--git-path", "CHERRY_PICK_HEAD")
+			path := filepath.Join(f.root, "merging")
+			oid := f.branch("merging", path)
+			finishedPath := filepath.Join(f.root, "finished")
+			finished := f.branch("finished", finishedPath)
+			standalone := f.branch("standalone", "")
+			f.pullRequests("MERGED", map[string]string{"merging": oid, "finished": finished, "standalone": standalone})
+			state := f.run(path, "rev-parse", "--path-format=absolute", "--git-path", "MERGE_HEAD")
 			f.write(state, oid+"\n")
 			if status := f.run(path, "status", "--porcelain"); status != "" {
 				t.Fatalf("fixture should have clean files: %q", status)
 			}
 			r := cleanFixture(t, f, dry)
-			checkCounts(t, r, 1)
-			if r.WorktreesRemoved != 0 || r.WorktreesPlanned != 0 || r.BranchesDeleted != 0 || r.BranchesPlanned != 0 {
-				t.Fatalf("in-progress worktree selected for removal: %+v", r)
+			checkCounts(t, r, 3)
+			if dry {
+				if r.WorktreesRemoved != 0 || r.BranchesDeleted != 0 || r.WorktreesPlanned != 1 || r.BranchesPlanned != 2 {
+					t.Fatalf("unrelated completed work was not planned independently: %+v", r)
+				}
+			} else if r.WorktreesRemoved != 1 || r.BranchesDeleted != 2 || r.WorktreesPlanned != 0 || r.BranchesPlanned != 0 {
+				t.Fatalf("unrelated completed work was not removed independently: %+v", r)
 			}
-			f.assertBranch("cherry-picking", true)
+			f.assertBranch("merging", true)
+			f.assertBranch("finished", dry)
+			f.assertBranch("standalone", dry)
+			if _, err := os.Stat(finishedPath); os.IsNotExist(err) == dry {
+				t.Fatalf("finished worktree removal did not match dry-run mode: %v", err)
+			}
 			if body, err := os.ReadFile(state); err != nil || string(body) != oid+"\n" {
 				t.Fatalf("operation state lost: %q %v", body, err)
 			}

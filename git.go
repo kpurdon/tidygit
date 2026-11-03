@@ -201,7 +201,11 @@ func (r repository) deleteBranch(ctx context.Context, b Branch) (bool, error) {
 	} else if path != "" {
 		return false, fmt.Errorf("branch %s is checked out in %s; keeping it", b.Name, path)
 	}
-	if state, err := r.worktreeOperation(ctx, worktrees); err != nil {
+	protection, err := r.operationProtection(ctx, worktrees)
+	if err != nil {
+		return false, err
+	}
+	if state, err := protection.branchReason(r, b.Name); err != nil {
 		return false, err
 	} else if state != "" {
 		return false, fmt.Errorf("%s; keeping branch %s", state, b.Name)
@@ -257,21 +261,6 @@ func (r repository) checkedOutWorktree(branch string, worktrees []Worktree) (str
 func (r repository) protects(path string) bool {
 	path = canonicalPath(path)
 	return path == r.Dir || path == r.ProtectedPath
-}
-
-func (r repository) worktreeOperation(ctx context.Context, worktrees []Worktree) (string, error) {
-	for _, wt := range worktrees {
-		linked := r
-		linked.Dir = wt.Path
-		state, err := linked.inProgress(ctx)
-		if err != nil {
-			return "", err
-		}
-		if state != "" {
-			return fmt.Sprintf("%s in progress in %s", state, wt.Path), nil
-		}
-	}
-	return "", nil
 }
 
 func (r repository) gitDir(ctx context.Context) (string, error) {
