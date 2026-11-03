@@ -8,18 +8,36 @@ import (
 
 // disposableWorktree requires clean source and recoverable submodule history.
 // Ignored files in a verified-completed checkout are deliberately disposable.
-func (r repository) disposableWorktree(ctx context.Context, wt Worktree, b Branch, hasBranch bool) (submoduleRecovery, error) {
-	if err := r.checkWorktree(ctx, wt, b, hasBranch); err != nil {
-		return submoduleRecovery{}, err
+func (r repository) disposableWorktree(ctx context.Context, wt Worktree, b Branch, hasBranch bool) (submoduleDisposal, error) {
+	if err := r.checkDisposableSource(ctx, wt, b, hasBranch); err != nil {
+		return submoduleDisposal{}, err
+	}
+	plan, err := r.disposableSubmodulePlan(ctx, wt)
+	if err != nil {
+		return plan, err
+	}
+	return plan, r.checkDisposableSource(ctx, wt, b, hasBranch)
+}
+
+func (r repository) checkDisposableSource(ctx context.Context, wt Worktree, b Branch, hasBranch bool) error {
+	if err := r.checkWorktreeIdentity(ctx, wt, b, hasBranch); err != nil {
+		return err
 	}
 	if err := r.checkVisibleIndex(ctx, wt.Path); err != nil {
-		return submoduleRecovery{}, err
+		return err
 	}
-	return r.disposableSubmodulePlan(ctx, wt)
+	status, err := r.disposalGit(ctx, "", "-C", wt.Path, "status", "--porcelain=v1", "-z", "--untracked-files=all", "--ignore-submodules=none")
+	if err != nil {
+		return err
+	}
+	if status != "" {
+		return errors.New("worktree contains modified or untracked files; keeping it")
+	}
+	return nil
 }
 
 func (r repository) checkVisibleIndex(ctx context.Context, path string) error {
-	out, err := r.git(ctx, "-C", path, "ls-files", "-v", "-z")
+	out, err := r.disposalGit(ctx, "", "-C", path, "ls-files", "-v", "-z")
 	if err != nil {
 		return err
 	}
@@ -36,9 +54,13 @@ func (r repository) removeDisposableWorktree(ctx context.Context, wt Worktree, b
 	if err != nil {
 		return err
 	}
-	// Recheck branch identity, local changes, and operation ownership after the
-	// remote submodule proof, which may have taken time to complete.
-	if err := r.checkWorktree(ctx, wt, b, hasBranch); err != nil {
+	if err := r.revalidateSubmoduleDisposal(ctx, wt, plan); err != nil {
+		return err
+	}
+	if err := r.checkDisposableSource(ctx, wt, b, hasBranch); err != nil {
+		return err
+	}
+	if err := r.checkSubmoduleDisposalSnapshot(ctx, wt, plan); err != nil {
 		return err
 	}
 	args := []string{"worktree", "remove"}

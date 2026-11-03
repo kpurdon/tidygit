@@ -2,9 +2,12 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io/fs"
+	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -13,6 +16,11 @@ import (
 	"time"
 )
 
+type submoduleDisposal struct {
+	submoduleRecovery
+	fingerprint string
+}
+
 // checkDisposableSubmodules proves recovery from currently advertised remote
 // refs without fetching or changing local refs, indexes, or worktrees.
 func (r repository) checkDisposableSubmodules(ctx context.Context, wt Worktree) error {
@@ -20,15 +28,23 @@ func (r repository) checkDisposableSubmodules(ctx context.Context, wt Worktree) 
 	return err
 }
 
-func (r repository) disposableSubmodulePlan(ctx context.Context, wt Worktree) (submoduleRecovery, error) {
-	plan, err := r.submoduleRecoveryPlan(ctx, wt)
+func (r repository) disposableSubmodulePlan(ctx context.Context, wt Worktree) (submoduleDisposal, error) {
+	recovery, err := r.submoduleRecoveryPlan(ctx, wt)
+	plan := submoduleDisposal{submoduleRecovery: recovery}
 	if err != nil {
 		return plan, err
 	}
-	if err := checkInitializedModuleStorage(plan); err != nil {
+	if err := checkInitializedModuleStorage(recovery); err != nil {
 		return plan, err
 	}
-	for path, admin := range plan.modules {
+	// Capture every child before the first remote lookup can give another
+	// process time to create local history in an already-checked child.
+	plan.fingerprint, err = r.submoduleDisposalFingerprint(ctx, wt, recovery)
+	if err != nil {
+		return plan, err
+	}
+	for _, path := range slices.Sorted(maps.Keys(plan.modules)) {
+		admin := plan.modules[path]
 		child := r
 		child.Dir = filepath.Join(wt.Path, path)
 		parent := r
@@ -55,7 +71,138 @@ func (r repository) disposableSubmodulePlan(ctx context.Context, wt Worktree) (s
 			return plan, fmt.Errorf("submodule %q: %w", path, err)
 		}
 	}
-	return plan, nil
+	return plan, r.checkSubmoduleDisposalSnapshot(ctx, wt, plan)
+}
+
+func (r repository) revalidateSubmoduleDisposal(ctx context.Context, wt Worktree, plan submoduleDisposal) error {
+	current, err := r.submoduleRecoveryPlan(ctx, wt)
+	if err != nil {
+		return err
+	}
+	if current.admin != plan.admin || current.hasSubmodules != plan.hasSubmodules || !maps.Equal(current.modules, plan.modules) {
+		return errors.New("submodule ownership or initialization changed during verification")
+	}
+	if err := checkInitializedModuleStorage(current); err != nil {
+		return err
+	}
+	return r.checkSubmoduleDisposalSnapshot(ctx, wt, plan)
+}
+
+func (r repository) checkSubmoduleDisposalSnapshot(ctx context.Context, wt Worktree, plan submoduleDisposal) error {
+	fingerprint, err := r.submoduleDisposalFingerprint(ctx, wt, plan.submoduleRecovery)
+	if err != nil {
+		return err
+	}
+	if fingerprint != plan.fingerprint {
+		return errors.New("submodule recovery data changed during verification; keeping the entire checkout")
+	}
+	return nil
+}
+
+func (r repository) submoduleDisposalFingerprint(ctx context.Context, wt Worktree, plan submoduleRecovery) (string, error) {
+	admin, err := r.ownedWorktreeAdmin(ctx, wt)
+	if err != nil {
+		return "", err
+	}
+	if admin != plan.admin {
+		return "", errors.New("worktree Git storage changed during verification")
+	}
+	h := sha256.New()
+	for _, path := range slices.Sorted(maps.Keys(plan.modules)) {
+		child := r
+		child.Dir = filepath.Join(wt.Path, path)
+		if err := child.checkDisposableExtensionStorage(ctx, plan.modules[path]); err != nil {
+			return "", fmt.Errorf("submodule %q: %w", path, err)
+		}
+		fingerprintField(h, path)
+		fingerprintField(h, plan.modules[path])
+		pointer := filepath.Join(child.Dir, ".git")
+		info, err := os.Lstat(pointer)
+		if err != nil {
+			return "", err
+		}
+		if !info.Mode().IsRegular() {
+			return "", errors.New("submodule Git pointer is no longer a regular file")
+		}
+		if err := fingerprintTree(ctx, h, pointer, true); err != nil {
+			return "", err
+		}
+	}
+	root := filepath.Join(plan.admin, "modules")
+	if _, err := os.Lstat(root); errors.Is(err, os.ErrNotExist) {
+		fingerprintField(h, "modules:absent")
+	} else if err != nil {
+		return "", err
+	} else if err := filepath.WalkDir(root, func(path string, entry fs.DirEntry, walkErr error) error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if walkErr != nil {
+			return walkErr
+		}
+		info, err := entry.Info()
+		if err != nil {
+			return err
+		}
+		if info.Mode()&os.ModeSymlink != 0 || strings.HasSuffix(entry.Name(), ".lock") {
+			return errors.New("submodule Git metadata became symlinked or locked")
+		}
+		fingerprintField(h, path)
+		fingerprintField(h, info.Mode().String())
+		if entry.IsDir() {
+			return nil
+		}
+		if !info.Mode().IsRegular() {
+			return errors.New("submodule Git metadata contains an unsupported file type")
+		}
+		for _, admin := range plan.modules {
+			if strings.HasPrefix(path, filepath.Join(admin, "objects")+string(filepath.Separator)) {
+				// Git objects and packs are immutable; ordinary Git writes create
+				// new paths. Mutable refs, indexes, and reflogs are hashed below.
+				fingerprintField(h, fmt.Sprintf("%d:%d", info.Size(), info.ModTime().UnixNano()))
+				return nil
+			}
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		fingerprintField(h, string(data))
+		return nil
+	}); err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("%x", h.Sum(nil)), nil
+}
+
+func (r repository) checkDisposableExtensionStorage(ctx context.Context, admin string) error {
+	entries, err := os.ReadDir(admin)
+	if err != nil {
+		return err
+	}
+	for _, entry := range entries {
+		switch entry.Name() {
+		case "HEAD", "ORIG_HEAD", "FETCH_HEAD", "config", "config.worktree", "description", "index", "packed-refs", "shallow", "gitdir", "commondir", "COMMIT_EDITMSG", "AUTO_MERGE":
+			if !entry.Type().IsRegular() {
+				return errors.New("unsupported child Git metadata requires preservation")
+			}
+		case "branches", "hooks", "info", "logs", "modules", "objects", "refs", "reftable":
+			if !entry.IsDir() {
+				return errors.New("unsupported child Git metadata requires preservation")
+			}
+		default:
+			return errors.New("child Git extension or unsupported storage requires preservation")
+		}
+	}
+	configured, err := r.disposalGit(ctx, "", "config", "--name-only", "--get-regexp", `^(lfs\.|annex\.|svn-remote\.|git-p4\.)`)
+	if err != nil {
+		if exit, ok := errors.AsType[*exec.ExitError](err); !ok || exit.ExitCode() != 1 {
+			return err
+		}
+	} else if configured != "" {
+		return errors.New("child Git extension storage is configured and requires preservation")
+	}
+	return nil
 }
 
 func checkInitializedModuleStorage(plan submoduleRecovery) error {
