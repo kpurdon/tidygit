@@ -126,6 +126,18 @@ func cleanFixture(t *testing.T, f *cleanupFixture, dry bool) repoResult {
 	opts := defaultOptions()
 	opts.Auto = true
 	opts.DryRun = dry
+	return cleanFixtureOptions(t, f, opts)
+}
+
+func cleanFixtureWithArchives(t *testing.T, f *cleanupFixture, dry bool) repoResult {
+	t.Helper()
+	opts := defaultOptions()
+	opts.Auto, opts.Archive, opts.DryRun = true, true, dry
+	return cleanFixtureOptions(t, f, opts)
+}
+
+func cleanFixtureOptions(t *testing.T, f *cleanupFixture, opts options) repoResult {
+	t.Helper()
 	r, err := clean(t.Context(), f.repo, opts)
 	if err != nil || len(r.Errors) > 0 {
 		t.Fatalf("clean: %v, %+v", err, r)
@@ -214,18 +226,22 @@ func TestAutoPreservesDirtyAndNewerWork(t *testing.T) {
 			f.pullRequests(state, prs)
 			r := cleanFixture(t, f, false)
 			checkCounts(t, r, 6)
-			if r.BranchesDeleted != 2 || r.WorktreesRemoved != 2 {
+			if r.BranchesDeleted != 1 || r.WorktreesRemoved != 1 || len(r.Archives) != 0 {
 				t.Fatalf("unexpected deletions: %+v", r)
 			}
 			for name := range prs {
-				f.assertBranch(name, name != "clean" && name != "ignored")
-				if name != "clean" && name != "ignored" {
+				f.assertBranch(name, name != "clean")
+				if name != "clean" {
 					if _, err := os.Stat(filepath.Join(f.root, name)); err != nil {
 						t.Fatal(err)
 					}
 				}
 			}
 
+			r = cleanFixtureWithArchives(t, f, false)
+			if r.BranchesDeleted != 1 || r.WorktreesRemoved != 1 {
+				t.Fatalf("explicit archival did not clean ignored worktree: %+v", r)
+			}
 			if len(r.Archives) != 1 {
 				t.Fatalf("missing ignored-file archive: %+v", r)
 			}
@@ -295,6 +311,13 @@ func TestDryRunDoesNotMutateRepository(t *testing.T) {
 	}
 	before := snapshot()
 	r := cleanFixture(t, f, true)
+	if r.BranchesPlanned != 0 || r.WorktreesPlanned != 0 || len(r.Archives) != 0 {
+		t.Fatalf("default preview planned archive-required removal: %+v", r)
+	}
+	if !reflect.DeepEqual(before, snapshot()) {
+		t.Fatal("default dry run changed repository files, index, or refs")
+	}
+	r = cleanFixtureWithArchives(t, f, true)
 	after := snapshot()
 	if !reflect.DeepEqual(before, after) {
 		t.Fatal("dry run changed repository files, index, or refs")
@@ -485,7 +508,7 @@ func TestArchiveFailureKeepsWorktree(t *testing.T) {
 	}
 	f.write(filepath.Join(f.root, "state", "tidygit", "archives"), "blocks archive directory")
 	opts := defaultOptions()
-	opts.Auto = true
+	opts.Auto, opts.Archive = true, true
 	r, err := clean(t.Context(), f.repo, opts)
 	if err != nil || len(r.Errors) == 0 || r.WorktreesRemoved != 0 || r.BranchesDeleted != 0 {
 		t.Fatalf("archive failure not retained: %+v, %v", r, err)
@@ -671,7 +694,7 @@ func TestArchiveNestedIgnoredDirectoriesAndPreservePrimaryEnv(t *testing.T) {
 		}
 		f.write(target, data)
 	}
-	r := cleanFixture(t, f, false)
+	r := cleanFixtureWithArchives(t, f, false)
 	if r.WorktreesRemoved != 1 || r.BranchesDeleted != 1 || len(r.Archives) != 1 {
 		t.Fatalf("ignored directory prevented cleanup: %+v", r)
 	}
@@ -729,7 +752,17 @@ func TestAutoArchivesStaleDirtyWorkAndRetainsActiveProtectedWork(t *testing.T) {
 	}
 	f.run(f.dir, "config", "--add", "tidygit.keep", "keep")
 	f.pullRequests("OPEN", map[string]string{"open": oids["open"]})
-	result := cleanFixture(t, f, false)
+	kept := cleanFixture(t, f, false)
+	if kept.WorktreesRemoved != 0 || kept.BranchesDeleted != 0 || len(kept.Archives) != 0 {
+		t.Fatalf("stale work changed without --archive: %+v", kept)
+	}
+	for name, oid := range oids {
+		f.assertBranch(name, true)
+		if got := f.run(filepath.Join(f.root, name), "rev-parse", "HEAD"); got != oid {
+			t.Fatalf("retained %s history changed: %s", name, got)
+		}
+	}
+	result := cleanFixtureWithArchives(t, f, false)
 	if result.WorktreesRemoved != 1 || result.BranchesDeleted != 1 || len(result.Archives) != 1 {
 		t.Fatalf("cleanup counts: %+v", result)
 	}
@@ -768,7 +801,15 @@ func TestAutoArchivesStaleStandaloneBranchBeforeDeletingIt(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	result := cleanFixture(t, f, false)
+	kept := cleanFixture(t, f, false)
+	if kept.BranchesDeleted != 0 || len(kept.Archives) != 0 {
+		t.Fatalf("stale history changed without --archive: %+v", kept)
+	}
+	f.assertBranch("old", true)
+	if got := f.run(f.dir, "rev-parse", "old"); got != oid {
+		t.Fatalf("retained branch history changed: %s", got)
+	}
+	result := cleanFixtureWithArchives(t, f, false)
 	if result.BranchesDeleted != 1 || len(result.Archives) != 1 {
 		t.Fatalf("cleanup counts: %+v", result)
 	}

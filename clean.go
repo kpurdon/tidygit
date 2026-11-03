@@ -343,6 +343,9 @@ func cleanRepository(ctx context.Context, r repository, opts options) (result re
 				reason = "ignored files require verified completion or stale archival"
 			}
 		}
+		if reason == "" && !opts.Archive && (archiveAll || len(ignored) > 0) {
+			reason = "local files or Git history require preservation; use --archive to allow recovery archives"
+		}
 		if reason == "" {
 			linked := r
 			linked.Dir = wt.Path
@@ -504,6 +507,9 @@ func cleanRepository(ctx context.Context, r repository, opts options) (result re
 			} else if !stale && (opts.Auto || opts.DryRun) {
 				reason = cleanupKeepReason(pr, b)
 			}
+		}
+		if reason == "" && stale && !opts.Archive {
+			reason = "stale branch history requires preservation; use --archive to allow a recovery archive"
 		}
 		if reason != "" {
 			uiKeep(reason)
