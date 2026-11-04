@@ -17,6 +17,70 @@ type submoduleRecovery struct {
 	hasSubmodules bool
 }
 
+// syncInitializedSubmodules follows the current index top-down without creating
+// checkouts or overwriting ignored files, which submodule update would permit.
+func (r repository) syncInitializedSubmodules(ctx context.Context) error {
+	entries, err := r.git(ctx, "ls-files", "--stage", "-z")
+	if err != nil {
+		return err
+	}
+	for entry := range strings.SplitSeq(entries, "\x00") {
+		if !strings.HasPrefix(entry, "160000 ") {
+			continue
+		}
+		header, name, ok := strings.Cut(entry, "\t")
+		fields := strings.Fields(header)
+		if !ok || len(fields) != 3 || fields[2] != "0" {
+			return errors.New("invalid or unmerged submodule index entry")
+		}
+		name = filepath.FromSlash(name)
+		if err := validArchivePath(name); err != nil {
+			return err
+		}
+		child := r
+		child.Dir = filepath.Join(r.Dir, name)
+		if canonicalPath(child.Dir) != child.Dir {
+			return fmt.Errorf("submodule %q has a symlinked path", child.Dir)
+		}
+		if _, err := os.Lstat(filepath.Join(child.Dir, ".git")); errors.Is(err, os.ErrNotExist) {
+			continue
+		} else if err != nil {
+			return err
+		}
+		if operation, err := child.inProgress(ctx); err != nil {
+			return err
+		} else if operation != "" {
+			return fmt.Errorf("submodule %q has %s in progress", child.Dir, operation)
+		}
+		head, err := child.git(ctx, "rev-parse", "HEAD")
+		if err != nil {
+			return err
+		}
+		if strings.TrimSpace(head) != fields[1] {
+			// Nested gitlink drift is expected after updating the containing module.
+			status, err := child.git(ctx, "status", "--porcelain=v1", "--untracked-files=all", "--ignore-submodules=all")
+			if err != nil {
+				return err
+			}
+			if status != "" {
+				return fmt.Errorf("submodule %q has local changes", child.Dir)
+			}
+			if _, err := child.git(ctx, "cat-file", "-e", fields[1]+"^{commit}"); err != nil {
+				if _, err := child.git(ctx, "fetch", "--no-recurse-submodules", "origin", fields[1]); err != nil {
+					return err
+				}
+			}
+			if _, err := child.git(ctx, "checkout", "--no-recurse-submodules", "--detach", "--no-overwrite-ignore", fields[1]); err != nil {
+				return err
+			}
+		}
+		if err := child.syncInitializedSubmodules(ctx); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // submoduleArchivePolicy recognizes only submodules whose complete Git storage
 // belongs to this linked worktree. Other nested repositories remain protected.
 func (r repository) submoduleArchivePolicy(ctx context.Context, wt Worktree) (bool, error) {

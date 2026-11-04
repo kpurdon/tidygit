@@ -8,6 +8,145 @@ import (
 	"testing"
 )
 
+func TestDefaultBranchUpdateSynchronizesSubmodules(t *testing.T) {
+	for _, mode := range []string{"fast-forward", "rebase", "ignored collision", "dirty", "pin mismatch", "uninitialized", "dry-run"} {
+		t.Run(mode, func(t *testing.T) {
+			f := newCleanupFixture(t)
+			f.run(f.dir, "-c", "protocol.file.allow=always", "submodule", "add", f.bare, "child")
+			child := filepath.Join(f.dir, "child")
+			oldChild := f.run(child, "rev-parse", "HEAD")
+			f.run(f.dir, "commit", "-am", "add child")
+			oldParent := f.run(f.dir, "rev-parse", "HEAD")
+			f.write(filepath.Join(child, "tracked"), "new upstream content\n")
+			if mode == "ignored collision" {
+				f.write(filepath.Join(child, "ignored"), "upstream file\n")
+				f.run(child, "add", "--force", "ignored")
+			}
+			f.run(child, "commit", "-am", "update child")
+			newChild := f.run(child, "rev-parse", "HEAD")
+			f.run(f.dir, "commit", "-am", "update child pin")
+			f.run(f.dir, "push")
+			f.run(f.dir, "reset", "--hard", oldParent)
+			f.run(child, "checkout", "--detach", oldChild)
+			f.run(f.dir, "config", "submodule.recurse", "true")
+			switch mode {
+			case "ignored collision":
+				f.write(filepath.Join(child, "ignored"), "precious local bytes\n")
+			case "dirty":
+				f.write(filepath.Join(child, "tracked"), "precious local bytes\n")
+			case "pin mismatch":
+				f.run(child, "checkout", "--detach", newChild)
+			case "uninitialized":
+				f.run(f.dir, "submodule", "deinit", "child")
+			}
+			opts := defaultOptions()
+			opts.Auto = true
+			opts.Rebase = mode == "rebase"
+			opts.DryRun = mode == "dry-run"
+			result, err := clean(t.Context(), f.repo, opts)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if mode == "ignored collision" {
+				if len(result.Errors) == 0 {
+					t.Fatal("update must report the ignored-file collision")
+				}
+				body, err := os.ReadFile(filepath.Join(child, "ignored"))
+				if err != nil || string(body) != "precious local bytes\n" {
+					t.Fatalf("ignored content lost: %q %v", body, err)
+				}
+				return
+			}
+			if len(result.Errors) != 0 {
+				t.Fatalf("cleanup failed: %+v", result)
+			}
+			if mode == "dirty" || mode == "pin mismatch" || mode == "dry-run" {
+				if got := f.run(f.dir, "rev-parse", "HEAD"); got != oldParent {
+					t.Fatalf("protected checkout advanced: %s", got)
+				}
+				if mode == "dirty" {
+					body, err := os.ReadFile(filepath.Join(child, "tracked"))
+					if err != nil || string(body) != "precious local bytes\n" {
+						t.Fatalf("local changes lost: %q %v", body, err)
+					}
+				}
+				return
+			}
+			if mode == "uninitialized" {
+				if _, err := os.Stat(filepath.Join(child, ".git")); !os.IsNotExist(err) {
+					t.Fatalf("uninitialized child was changed: %v", err)
+				}
+			} else if got := f.run(child, "rev-parse", "HEAD"); got != newChild {
+				t.Fatalf("submodule remained at %s; parent requires %s", got, newChild)
+			}
+			if status := f.run(f.dir, "status", "--porcelain", "--ignore-submodules=none"); status != "" {
+				t.Fatalf("update left dirty checkout: %s", status)
+			}
+		})
+	}
+}
+
+func TestDefaultBranchUpdateSynchronizesNestedSubmodules(t *testing.T) {
+	f := newCleanupFixture(t)
+	f.run(f.dir, "-c", "protocol.file.allow=always", "submodule", "add", f.bare, "child")
+	child := filepath.Join(f.dir, "child")
+	f.run(child, "-c", "protocol.file.allow=always", "submodule", "add", f.bare, "nested")
+	nested := filepath.Join(child, "nested")
+	oldNested := f.run(nested, "rev-parse", "HEAD")
+	f.run(child, "commit", "-am", "add nested child")
+	oldChild := f.run(child, "rev-parse", "HEAD")
+	f.run(f.dir, "commit", "-am", "add child")
+	oldParent := f.run(f.dir, "rev-parse", "HEAD")
+	f.write(filepath.Join(nested, "tracked"), "new nested content\n")
+	f.run(nested, "commit", "-am", "update nested child")
+	newNested := f.run(nested, "rev-parse", "HEAD")
+	f.run(child, "commit", "-am", "update nested pin")
+	newChild := f.run(child, "rev-parse", "HEAD")
+	f.run(f.dir, "commit", "-am", "update child pin")
+	f.run(f.dir, "push")
+	f.run(f.dir, "reset", "--hard", oldParent)
+	f.run(child, "checkout", "--detach", oldChild)
+	f.run(nested, "checkout", "--detach", oldNested)
+	f.write(filepath.Join(nested, "ignored"), "local cache\n")
+	cleanFixture(t, f, false)
+	if got := f.run(child, "rev-parse", "HEAD"); got != newChild {
+		t.Fatalf("child remained at %s; want %s", got, newChild)
+	}
+	if got := f.run(nested, "rev-parse", "HEAD"); got != newNested {
+		t.Fatalf("nested child remained at %s; want %s", got, newNested)
+	}
+	if body, err := os.ReadFile(filepath.Join(nested, "ignored")); err != nil || string(body) != "local cache\n" {
+		t.Fatalf("nested ignored file changed: %q %v", body, err)
+	}
+	if status := f.run(f.dir, "status", "--porcelain", "--ignore-submodules=none"); status != "" {
+		t.Fatalf("update left nested submodule drift: %s", status)
+	}
+}
+
+func TestDefaultBranchUpdateFetchesMissingSubmoduleCommit(t *testing.T) {
+	f := newCleanupFixture(t)
+	f.run(f.dir, "-c", "protocol.file.allow=always", "submodule", "add", f.bare, "child")
+	child := filepath.Join(f.dir, "child")
+	f.run(f.dir, "commit", "-am", "add child")
+	oldParent := f.run(f.dir, "rev-parse", "HEAD")
+	writer := filepath.Join(f.root, "writer")
+	f.run(f.root, "clone", f.bare, writer)
+	f.write(filepath.Join(writer, "tracked"), "new remote child content\n")
+	f.run(writer, "commit", "-am", "update remote child")
+	newChild := f.run(writer, "rev-parse", "HEAD")
+	f.run(writer, "push", "origin", "HEAD:refs/heads/interfaces")
+	f.run(f.dir, "update-index", "--cacheinfo", "160000,"+newChild+",child")
+	f.run(f.dir, "commit", "-m", "update child pin")
+	f.run(f.dir, "push")
+	f.run(f.dir, "reset", "--hard", oldParent)
+	f.run(f.dir, "config", "fetch.recurseSubmodules", "false")
+	f.run(child, "config", "protocol.file.allow", "always")
+	cleanFixture(t, f, false)
+	if got := f.run(child, "rev-parse", "HEAD"); got != newChild {
+		t.Fatalf("missing commit not fetched and checked out: %s", got)
+	}
+}
+
 func TestCompletedWorktreeKeepsNestedBareRepository(t *testing.T) {
 	for _, mode := range []string{"backup.git", "backup", "missing HEAD"} {
 		t.Run(mode, func(t *testing.T) {

@@ -140,8 +140,11 @@ func cleanRepository(ctx context.Context, r repository, opts options) (result re
 			if occupied {
 				uiWarn("Default branch is in another worktree; leaving the current checkout untouched")
 			} else {
-				if _, err = r.git(ctx, "switch", "--no-overwrite-ignore", defaultBranch); err != nil {
+				if _, err = r.git(ctx, "switch", "--no-recurse-submodules", "--no-overwrite-ignore", defaultBranch); err != nil {
 					return fail("switching to default branch", err)
+				}
+				if err = r.syncInitializedSubmodules(ctx); err != nil {
+					return fail("synchronizing default branch submodules", err)
 				}
 				uiAction("SWITCHED", defaultBranch)
 				args := []string{"merge", "--ff-only", "--no-overwrite-ignore", "refs/remotes/origin/" + defaultBranch}
@@ -160,6 +163,9 @@ func cleanRepository(ctx context.Context, r repository, opts options) (result re
 				if update {
 					if _, err = r.git(ctx, args...); err != nil {
 						return fail("updating default branch", err)
+					}
+					if err = r.syncInitializedSubmodules(ctx); err != nil {
+						return fail("synchronizing updated submodules", err)
 					}
 					uiAction("UPDATED", defaultBranch)
 				}
