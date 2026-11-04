@@ -8,6 +8,47 @@ import (
 	"testing"
 )
 
+func TestCompletedWorktreeKeepsSymlinkedSubmodulesWithoutError(t *testing.T) {
+	for _, kind := range []string{"shared child", "dangling child", "shared ancestor", "dangling ancestor"} {
+		t.Run(kind, func(t *testing.T) {
+			f := newCleanupFixture(t)
+			f.run(f.dir, "-c", "protocol.file.allow=always", "submodule", "add", f.bare, "modules/child")
+			f.run(f.dir, "commit", "-am", "record child")
+			shared := filepath.Join(f.dir, "modules", "child")
+			sharedHead := f.run(shared, "rev-parse", "HEAD")
+			path := filepath.Join(f.root, "completed")
+			oid := f.branch("completed", path)
+			link := filepath.Join(path, "modules", "child")
+			target := shared
+			if strings.Contains(kind, "ancestor") {
+				link = filepath.Dir(link)
+				target = filepath.Dir(shared)
+			}
+			if strings.Contains(kind, "dangling") {
+				target = filepath.Join(f.root, "missing")
+			}
+			if err := os.RemoveAll(link); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(target, link); err != nil {
+				t.Fatal(err)
+			}
+			f.pullRequests("MERGED", map[string]string{"completed": oid})
+			result := cleanFixture(t, f, false)
+			if result.WorktreesRemoved != 0 || result.BranchesDeleted != 0 {
+				t.Fatalf("symlinked checkout was removed: %+v", result)
+			}
+			f.assertBranch("completed", true)
+			if got, err := os.Readlink(link); err != nil || got != target {
+				t.Fatalf("checkout link changed: %q %v", got, err)
+			}
+			if got := f.run(shared, "rev-parse", "HEAD"); got != sharedHead {
+				t.Fatalf("shared submodule changed: %s", got)
+			}
+		})
+	}
+}
+
 func TestDefaultBranchUpdateSynchronizesSubmodules(t *testing.T) {
 	for _, mode := range []string{"fast-forward", "rebase", "ignored collision", "dirty", "pin mismatch", "uninitialized", "dry-run"} {
 		t.Run(mode, func(t *testing.T) {
@@ -148,7 +189,7 @@ func TestDefaultBranchUpdateFetchesMissingSubmoduleCommit(t *testing.T) {
 }
 
 func TestCompletedWorktreeKeepsNestedBareRepository(t *testing.T) {
-	for _, mode := range []string{"backup.git", "backup", "missing HEAD"} {
+	for _, mode := range []string{"backup.git", "backup", "missing HEAD", "objects and refs only"} {
 		t.Run(mode, func(t *testing.T) {
 			f := newCleanupFixture(t)
 			f.write(filepath.Join(f.dir, ".gitignore"), "backup*/\n")
@@ -157,7 +198,7 @@ func TestCompletedWorktreeKeepsNestedBareRepository(t *testing.T) {
 			path := filepath.Join(f.root, "completed")
 			oid := f.branch("completed", path)
 			name := mode
-			if mode == "missing HEAD" {
+			if mode == "missing HEAD" || mode == "objects and refs only" {
 				name = "backup"
 			}
 			bare := filepath.Join(path, name)
@@ -165,9 +206,16 @@ func TestCompletedWorktreeKeepsNestedBareRepository(t *testing.T) {
 			tree := f.run(f.dir, "rev-parse", "HEAD^{tree}")
 			unique := f.run(path, "--git-dir", bare, "commit-tree", tree, "-p", oid, "-m", "unique recovery history")
 			f.run(path, "--git-dir", bare, "update-ref", "refs/heads/recovery", unique)
-			if mode == "missing HEAD" {
+			if mode == "missing HEAD" || mode == "objects and refs only" {
 				if err := os.Remove(filepath.Join(bare, "HEAD")); err != nil {
 					t.Fatal(err)
+				}
+			}
+			if mode == "objects and refs only" {
+				for _, name := range []string{"config", "packed-refs"} {
+					if err := os.Remove(filepath.Join(bare, name)); err != nil && !os.IsNotExist(err) {
+						t.Fatal(err)
+					}
 				}
 			}
 			f.pullRequests("MERGED", map[string]string{"completed": oid})
@@ -176,7 +224,7 @@ func TestCompletedWorktreeKeepsNestedBareRepository(t *testing.T) {
 				t.Fatalf("nested bare recovery history was discarded: %+v", result)
 			}
 			f.assertBranch("completed", true)
-			if mode == "missing HEAD" {
+			if mode == "missing HEAD" || mode == "objects and refs only" {
 				f.write(filepath.Join(bare, "HEAD"), "ref: refs/heads/main\n")
 			}
 			if got := f.run(path, "--git-dir", bare, "rev-parse", "recovery"); got != unique {
@@ -203,6 +251,28 @@ func TestCompletedWorktreeDiscardsOrdinaryIgnoredDirectory(t *testing.T) {
 	result := cleanFixture(t, f, false)
 	if result.WorktreesRemoved != 1 || result.BranchesDeleted != 1 || len(result.Archives) != 0 {
 		t.Fatalf("ordinary ignored directory prevented cleanup: %+v", result)
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("completed checkout remains: %v", err)
+	}
+}
+
+func TestCompletedWorktreeDiscardsIgnoredPackageWithGitNames(t *testing.T) {
+	f := newCleanupFixture(t)
+	path := filepath.Join(f.root, "completed")
+	oid := f.branch("completed", path)
+	ignored := filepath.Join(path, "ignored")
+	for _, dir := range []string{"objects", "refs"} {
+		if err := os.MkdirAll(filepath.Join(ignored, dir), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	f.write(filepath.Join(ignored, "objects", "blob.py"), "class Blob: pass\n")
+	f.write(filepath.Join(ignored, "refs", "head.py"), "class Head: pass\n")
+	f.pullRequests("MERGED", map[string]string{"completed": oid})
+	result := cleanFixture(t, f, false)
+	if result.WorktreesRemoved != 1 || result.BranchesDeleted != 1 {
+		t.Fatalf("ordinary package names blocked cleanup: %+v", result)
 	}
 	if _, err := os.Stat(path); !os.IsNotExist(err) {
 		t.Fatalf("completed checkout remains: %v", err)
