@@ -335,12 +335,12 @@ func cleanRepository(ctx context.Context, r repository, opts options) (result re
 		var ignored []string
 		disposable := false
 		if reason == "" {
-			name, pathErr := r.symlinkedSubmodule(ctx, wt.Path)
+			submoduleReason, pathErr := r.submoduleKeepReason(ctx, wt.Path)
 			if pathErr != nil {
 				result.addErr("checking submodule paths", pathErr)
 				reason = "unable to verify submodule paths"
-			} else if name != "" {
-				reason = fmt.Sprintf("submodule %q uses a symlinked checkout; manual cleanup required", name)
+			} else {
+				reason = submoduleReason
 			}
 		}
 		if reason == "" {

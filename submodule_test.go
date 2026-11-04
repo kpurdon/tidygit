@@ -8,6 +8,62 @@ import (
 	"testing"
 )
 
+func TestCleanupKeepsDanglingSubmodulePointer(t *testing.T) {
+	for _, mode := range []string{"relative", "absolute", "fix", "dry-run"} {
+		t.Run(mode, func(t *testing.T) {
+			f, opts := repairFixture(t, "codex", repairedReport, "")
+			opts.Fix = mode == "fix"
+			opts.DryRun = mode == "dry-run"
+			f.run(f.dir, "-c", "protocol.file.allow=always", "submodule", "add", f.bare, "child")
+			f.run(f.dir, "commit", "-am", "record child")
+			path := filepath.Join(f.root, "completed")
+			oid := f.branch("completed", path)
+			f.run(path, "-c", "protocol.file.allow=always", "submodule", "update", "--init")
+			pointer := filepath.Join(path, "child", ".git")
+			target := "../../missing-metadata"
+			if mode == "absolute" {
+				target = filepath.Join(f.root, "missing-metadata")
+			}
+			body := "gitdir: " + target + "\n"
+			f.write(pointer, body)
+			precious := filepath.Join(path, "child", "tracked")
+			f.write(precious, "local submodule work\n")
+			f.branch("other-completed", "")
+			f.pullRequests("MERGED", map[string]string{"completed": oid, "other-completed": oid})
+			result := cleanFixtureOptions(t, f, opts)
+			if result.WorktreesRemoved != 0 || result.Repaired || repairCallCount(t, "TEST_REPAIR_CALLS") != 0 {
+				t.Fatalf("protected checkout was removed or repaired: %+v", result)
+			}
+			f.assertBranch("completed", true)
+			f.assertBranch("other-completed", opts.DryRun)
+			for file, want := range map[string]string{pointer: body, precious: "local submodule work\n"} {
+				if got, err := os.ReadFile(file); err != nil || string(got) != want {
+					t.Fatalf("protected file changed: %s: %q, %v", file, got, err)
+				}
+			}
+		})
+	}
+}
+
+func TestCleanupKeepsSubmoduleReplacedWithFile(t *testing.T) {
+	f := newCleanupFixture(t)
+	f.run(f.dir, "-c", "protocol.file.allow=always", "submodule", "add", f.bare, "child")
+	f.run(f.dir, "commit", "-am", "record child")
+	path := filepath.Join(f.root, "completed")
+	oid := f.branch("completed", path)
+	child := filepath.Join(path, "child")
+	if err := os.Remove(child); err != nil {
+		t.Fatal(err)
+	}
+	f.write(child, "local replacement\n")
+	f.pullRequests("MERGED", map[string]string{"completed": oid})
+	cleanFixture(t, f, false)
+	f.assertBranch("completed", true)
+	if got, err := os.ReadFile(child); err != nil || string(got) != "local replacement\n" {
+		t.Fatalf("replacement file changed: %q, %v", got, err)
+	}
+}
+
 func TestCompletedWorktreeKeepsSymlinkedSubmodulesWithoutError(t *testing.T) {
 	for _, kind := range []string{"shared child", "dangling child", "shared ancestor", "dangling ancestor"} {
 		t.Run(kind, func(t *testing.T) {

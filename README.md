@@ -68,6 +68,8 @@ tidygit --auto --fix
 
 `--fix` allows one agent repair attempt per repository when default-branch detection, fetching, or the initial PR lookup fails. The agent can inspect the repository and use shell and file tools to repair local Git metadata, including problems such as case-colliding remote-tracking refs. It is instructed to preserve local work and configuration, avoid history rewrites and remote writes, and report unresolved problems. Before resuming cleanup, tidygit checks repository identity, local refs, worktrees, staging, file metadata, and configuration, then reruns normal cleanup checks. `--dry-run` never invokes the agent.
 
+Worktrees with submodule pointers to missing Git metadata are kept for manual repair without failing cleanup. `--fix` does not repair those pointers.
+
 The selected provider receives diagnostics and can read repository content through its tools. Codex uses automatic approval review with a workspace-write sandbox and explicit access to the repository and its Git directories; Claude uses its auto permission mode. CLI authentication is reused, while hooks and unrelated MCP integrations are disabled. Agent permissions and organization policy govern execution, rather than a fixed tidygit command allowlist. Use a current CLI and account supporting these modes; refusal or unsupported flags leave the failure unresolved.
 
 Repair transcripts are saved under `${XDG_STATE_HOME:-~/.local/state}/tidygit/repairs`; this location must be outside the repository's worktrees. Use `--agent-timeout 10m` to override the five-minute agent timeout independently of Git/GitHub command timeouts. Repairs happen in place: a failed or interrupted attempt can leave changes, which tidygit does not automatically roll back.
