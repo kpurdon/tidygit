@@ -18,11 +18,20 @@ type submoduleRecovery struct {
 	hasSubmodules bool
 }
 
-func (r repository) symlinkedSubmodule(ctx context.Context, worktree string) (string, error) {
+type missingSubmoduleMetadata struct {
+	Worktree, Path, GitDirectory string
+}
+
+func (m *missingSubmoduleMetadata) Error() string {
+	return fmt.Sprintf("submodule %q in %q points to missing Git metadata %q", m.Path, m.Worktree, m.GitDirectory)
+}
+
+func (r repository) submoduleKeepReason(ctx context.Context, worktree string) (string, error) {
 	entries, err := r.git(ctx, "-C", worktree, "ls-files", "--stage", "-z")
 	if err != nil {
 		return "", err
 	}
+submodules:
 	for entry := range strings.SplitSeq(entries, "\x00") {
 		if !strings.HasPrefix(entry, "160000 ") {
 			continue
@@ -43,16 +52,46 @@ func (r repository) symlinkedSubmodule(ctx context.Context, worktree string) (st
 			path = filepath.Join(path, component)
 			info, err := os.Lstat(path)
 			if errors.Is(err, os.ErrNotExist) {
-				break
+				continue submodules
 			} else if err != nil {
 				return "", err
 			}
 			if info.Mode()&os.ModeSymlink != 0 {
-				return name, nil
+				return fmt.Sprintf("submodule %q uses a symlinked checkout; manual cleanup required", name), nil
 			}
 			if !info.IsDir() {
-				break
+				continue submodules
 			}
+		}
+		pointer := filepath.Join(worktree, local, ".git")
+		info, err := os.Lstat(pointer)
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		} else if err != nil {
+			return "", err
+		}
+		if !info.Mode().IsRegular() {
+			continue
+		}
+		data, err := os.ReadFile(pointer)
+		if err != nil {
+			return "", err
+		}
+		target, ok := strings.CutPrefix(string(data), "gitdir: ")
+		if !ok {
+			continue
+		}
+		target = strings.TrimRight(target, "\r\n")
+		if target == "" {
+			continue
+		}
+		if !filepath.IsAbs(target) {
+			target = filepath.Join(filepath.Dir(pointer), target)
+		}
+		if _, err := os.Stat(target); errors.Is(err, os.ErrNotExist) {
+			return "", &missingSubmoduleMetadata{Worktree: worktree, Path: name, GitDirectory: target}
+		} else if err != nil {
+			return "", err
 		}
 	}
 	return "", nil
