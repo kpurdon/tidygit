@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -113,6 +114,89 @@ func TestDisposableSubmodulesRemoteRefreshAndAnnotatedTags(t *testing.T) {
 	f.run(child, "push", "origin", ":refs/tags/published")
 	if err := f.repo.checkDisposableSubmodules(t.Context(), wt); err == nil {
 		t.Fatal("proof reused stale remote advertisement after tag deletion")
+	}
+}
+
+func TestDisposableSubmodulesDiscardOnlyStaleRemoteCache(t *testing.T) {
+	for _, kind := range []string{"stale", "clone-cache", "live", "head", "branch", "head-reflog", "oldest-reflog", "branch-reflog", "orig-head", "loose-blob", "other-remote", "custom-fetch", "manual-cache-ref"} {
+		t.Run(kind, func(t *testing.T) {
+			f, wt, child := disposableSubmoduleFixture(t)
+			initial := f.run(child, "rev-parse", "HEAD")
+			writer := filepath.Join(f.root, "writer")
+			f.run(f.root, "clone", f.bare, writer)
+			f.run(writer, "commit", "--allow-empty", "-m", "generated upstream commit")
+			extra := f.run(writer, "rev-parse", "HEAD")
+			f.run(writer, "push", "origin", "HEAD:refs/heads/generated")
+			f.run(child, "fetch", "origin")
+			if kind != "live" {
+				f.run(writer, "push", "origin", ":refs/heads/generated")
+			}
+			switch kind {
+			case "clone-cache":
+				admin := f.run(child, "rev-parse", "--absolute-git-dir")
+				if err := os.Remove(filepath.Join(admin, "logs", "refs", "remotes", "origin", "generated")); err != nil {
+					t.Fatal(err)
+				}
+			case "head":
+				f.run(child, "checkout", "--detach", extra)
+				f.run(wt.Path, "commit", "-am", "record child")
+				wt.OID = f.run(wt.Path, "rev-parse", "HEAD")
+			case "branch":
+				f.run(child, "branch", "-f", "main", extra)
+			case "head-reflog", "oldest-reflog":
+				f.run(child, "checkout", "--detach", extra)
+				f.run(child, "checkout", "--detach", initial)
+				if kind == "oldest-reflog" {
+					admin := f.run(child, "rev-parse", "--absolute-git-dir")
+					log := filepath.Join(admin, "logs", "HEAD")
+					data, err := os.ReadFile(log)
+					if err != nil {
+						t.Fatal(err)
+					}
+					_, last, ok := strings.CutLast(strings.TrimSuffix(string(data), "\n"), "\n")
+					if !ok || !strings.HasPrefix(last, extra+" "+initial+" ") {
+						t.Fatal("fixture lacks old-only recovery endpoint")
+					}
+					f.write(log, last+"\n")
+				}
+			case "branch-reflog":
+				f.run(child, "branch", "-f", "main", extra)
+				f.run(child, "branch", "-f", "main", initial)
+			case "orig-head":
+				f.run(child, "update-ref", "ORIG_HEAD", extra)
+			case "loose-blob":
+				path := filepath.Join(f.root, "unpublished")
+				f.write(path, "unpublished loose data\n")
+				f.run(child, "hash-object", "-w", path)
+			case "other-remote":
+				f.run(child, "update-ref", "refs/remotes/other/generated", extra)
+			case "custom-fetch":
+				f.run(child, "config", "remote.origin.fetch", "+refs/tags/*:refs/remotes/origin/*")
+			case "manual-cache-ref":
+				tree := f.run(child, "rev-parse", "HEAD^{tree}")
+				local := f.run(child, "commit-tree", tree, "-p", extra, "-m", "local recovery")
+				f.run(child, "update-ref", "refs/remotes/origin/generated", local)
+			}
+			refs := f.run(child, "show-ref")
+			err := f.repo.checkDisposableSubmodules(t.Context(), wt)
+			wantDisposable := kind == "stale" || kind == "clone-cache" || kind == "live"
+			if (err == nil) != wantDisposable {
+				t.Fatalf("%s disposable=%v, want %v: %v", kind, err == nil, wantDisposable, err)
+			}
+			if got := f.run(child, "show-ref"); got != refs {
+				t.Fatal("read-only proof changed refs")
+			}
+			if kind == "stale" {
+				f.pullRequests("MERGED", map[string]string{wt.Branch: wt.OID})
+				result := cleanFixture(t, f, false)
+				if result.WorktreesRemoved != 1 {
+					t.Fatalf("stale cache still blocked completed-worktree cleanup: %+v", result)
+				}
+				if _, err := os.Stat(wt.Path); !os.IsNotExist(err) {
+					t.Fatalf("completed worktree remains: %v", err)
+				}
+			}
+		})
 	}
 }
 
