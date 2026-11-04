@@ -18,6 +18,14 @@ type submoduleRecovery struct {
 	hasSubmodules bool
 }
 
+type missingSubmoduleMetadata struct {
+	Worktree, Path, GitDirectory string
+}
+
+func (m *missingSubmoduleMetadata) Error() string {
+	return fmt.Sprintf("submodule %q in %q points to missing Git metadata %q", m.Path, m.Worktree, m.GitDirectory)
+}
+
 func (r repository) submoduleKeepReason(ctx context.Context, worktree string) (string, error) {
 	entries, err := r.git(ctx, "-C", worktree, "ls-files", "--stage", "-z")
 	if err != nil {
@@ -81,7 +89,7 @@ submodules:
 			target = filepath.Join(filepath.Dir(pointer), target)
 		}
 		if _, err := os.Stat(target); errors.Is(err, os.ErrNotExist) {
-			return fmt.Sprintf("submodule %q points to missing Git metadata; keeping worktree, manual repair required", name), nil
+			return "", &missingSubmoduleMetadata{Worktree: worktree, Path: name, GitDirectory: target}
 		} else if err != nil {
 			return "", err
 		}

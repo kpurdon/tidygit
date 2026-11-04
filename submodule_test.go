@@ -9,10 +9,10 @@ import (
 )
 
 func TestCleanupKeepsDanglingSubmodulePointer(t *testing.T) {
-	for _, mode := range []string{"relative", "absolute", "fix", "dry-run"} {
+	for _, mode := range []string{"relative", "absolute", "dry-run"} {
 		t.Run(mode, func(t *testing.T) {
 			f, opts := repairFixture(t, "codex", repairedReport, "")
-			opts.Fix = mode == "fix"
+			opts.Fix = mode == "dry-run"
 			opts.DryRun = mode == "dry-run"
 			f.run(f.dir, "-c", "protocol.file.allow=always", "submodule", "add", f.bare, "child")
 			f.run(f.dir, "commit", "-am", "record child")

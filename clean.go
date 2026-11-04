@@ -24,6 +24,7 @@ type repoResult struct {
 	RepairLog                                                            string
 	Repaired                                                             bool
 	repairStage                                                          string
+	repairSubmodule                                                      *missingSubmoduleMetadata
 	cacheFingerprint                                                     string
 }
 
@@ -336,7 +337,14 @@ func cleanRepository(ctx context.Context, r repository, opts options) (result re
 		disposable := false
 		if reason == "" {
 			submoduleReason, pathErr := r.submoduleKeepReason(ctx, wt.Path)
-			if pathErr != nil {
+			if missing, ok := errors.AsType[*missingSubmoduleMetadata](pathErr); ok {
+				if opts.Fix && !opts.DryRun && len(result.Errors) == 0 {
+					result.repairStage = "checking submodule Git metadata"
+					result.repairSubmodule = missing
+					return fail(result.repairStage, missing)
+				}
+				reason = missing.Error() + "; keeping worktree, use --fix to attempt repair"
+			} else if pathErr != nil {
 				result.addErr("checking submodule paths", pathErr)
 				reason = "unable to verify submodule paths"
 			} else {

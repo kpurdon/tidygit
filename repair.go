@@ -3,11 +3,13 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json/jsontext"
 	"encoding/json/v2"
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"maps"
 	"os"
 	"os/exec"
@@ -51,17 +53,33 @@ func repairRepository(ctx context.Context, r repository, opts options, agent str
 	if err != nil {
 		return fail(fmt.Errorf("recording repository state: %w", err))
 	}
+	var storageRoot string
+	var storageBefore map[string]string
+	var repairRoots []string
+	if target := original.repairSubmodule; target != nil {
+		admin, err := r.ownedWorktreeAdmin(ctx, Worktree{Path: target.Worktree})
+		if err != nil {
+			return fail(err)
+		}
+		storageRoot = filepath.Join(admin, "modules")
+		storageBefore, err = snapshotRepairStorage(ctx, storageRoot)
+		if err != nil {
+			return fail(fmt.Errorf("recording submodule recovery data: %w", err))
+		}
+		repairRoots = append(repairRoots, canonicalPath(target.Worktree))
+	}
 	status, err := r.git(ctx, "status", "--short", "--branch")
 	if err != nil {
 		return fail(err)
 	}
 	input, err := json.Marshal(struct {
-		Repository   string   `json:"repository"`
-		Operation    string   `json:"operation"`
-		Errors       []string `json:"errors"`
-		Status       string   `json:"status"`
-		GitDirectory string   `json:"git_directory"`
-	}{r.Dir, original.repairStage, original.Errors, status, r.CommonDir})
+		Repository   string                    `json:"repository"`
+		Operation    string                    `json:"operation"`
+		Errors       []string                  `json:"errors"`
+		Status       string                    `json:"status"`
+		GitDirectory string                    `json:"git_directory"`
+		Submodule    *missingSubmoduleMetadata `json:"submodule,omitempty"`
+	}{r.Dir, original.repairStage, original.Errors, status, r.CommonDir, original.repairSubmodule})
 	if err != nil {
 		return fail(err)
 	}
@@ -91,11 +109,13 @@ Preserve all local branches, tags, stashes, worktrees, staged changes, tracked e
 
 Investigate the actual cause: a lock error can come from concurrent Git operations, a stale lock, or case-colliding refs on a case-insensitive filesystem. Do not delete a lock based only on its age or the error message. If another process or uncertain ownership makes repair unsafe, stop and report blocked. Use the CLI's approval mechanism if a required command is sandboxed; never bypass its controls.
 
+For a missing submodule Git directory, locate and restore the original metadata if possible. Preserve the checkout's files and all recoverable staging, refs, reflogs, and objects. Do not borrow shared Git storage from another checkout, remove the .git pointer to hide the failure, or rebuild an index when the original staging cannot be recovered. The repaired submodule must use Git storage owned by its linked worktree. If that cannot be established, report blocked.
+
 Return status repaired only after completing and checking the repair, otherwise blocked. Give a concise summary of changes and any remaining blocker. Tidygit independently checks preserved state and reruns cleanup; your report alone does not establish success.
 
 Transcript directory: ` + dir + "\n\n" + string(input)
 	uiAction("REPAIR", agent+" · transcript: "+dir)
-	report, err := runRepairAgent(ctx, agent, dir, prompt, opts.AgentTimeout, r)
+	report, err := runRepairAgent(ctx, agent, dir, prompt, opts.AgentTimeout, r, repairRoots...)
 	if err != nil {
 		return fail(err)
 	}
@@ -119,12 +139,116 @@ Transcript directory: ` + dir + "\n\n" + string(input)
 	if !repairPreservedLocalState(before, after) {
 		return fail(errors.New("local work or configuration changed during repair; cleanup stopped, inspect the transcript"))
 	}
+	if original.repairSubmodule != nil {
+		storageAfter, err := snapshotRepairStorage(ctx, storageRoot)
+		if err != nil {
+			return fail(fmt.Errorf("checking submodule recovery data: %w", err))
+		}
+		for path, fingerprint := range storageBefore {
+			if storageAfter[path] != fingerprint {
+				return fail(fmt.Errorf("submodule recovery data changed during repair: %s", path))
+			}
+		}
+		if err := verifySubmoduleRepair(ctx, fresh, original.repairSubmodule); err != nil {
+			return fail(fmt.Errorf("verifying submodule repair: %w", err))
+		}
+	}
 
 	uiAction("RECHECK", "rediscovering cleanup eligibility after repair")
 	result, returnedErr = cleanRepository(ctx, fresh, opts)
+	result.WorktreesTotal += original.WorktreesRemoved
+	result.WorktreesRemoved += original.WorktreesRemoved
+	result.BranchesTotal += original.BranchesDeleted
+	result.BranchesDeleted += original.BranchesDeleted
+	result.Archives = append(original.Archives, result.Archives...)
 	result.RepairLog = dir
 	result.Repaired = returnedErr == nil && len(result.Errors) == 0 && ctx.Err() == nil
 	return result, returnedErr
+}
+
+// Existing recovery data must survive; restoring missing storage may add entries.
+func snapshotRepairStorage(ctx context.Context, root string) (map[string]string, error) {
+	entries := map[string]string{}
+	if _, err := os.Lstat(root); errors.Is(err, os.ErrNotExist) {
+		return entries, nil
+	} else if err != nil {
+		return nil, err
+	}
+	err := filepath.WalkDir(root, func(path string, entry fs.DirEntry, walkErr error) error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if walkErr != nil {
+			return walkErr
+		}
+		info, err := entry.Info()
+		if err != nil {
+			return err
+		}
+		if info.IsDir() {
+			entries[path] = info.Mode().String()
+			return nil
+		}
+		if !info.Mode().IsRegular() {
+			return fmt.Errorf("unsupported submodule recovery file: %s", path)
+		}
+		file, err := os.Open(path)
+		if err != nil {
+			return err
+		}
+		h := sha256.New()
+		_, readErr := io.Copy(h, file)
+		closeErr := file.Close()
+		if err := errors.Join(readErr, closeErr); err != nil {
+			return err
+		}
+		entries[path] = fmt.Sprintf("%s:%x", info.Mode(), h.Sum(nil))
+		return nil
+	})
+	return entries, err
+}
+
+func verifySubmoduleRepair(ctx context.Context, r repository, target *missingSubmoduleMetadata) error {
+	admin, err := r.ownedWorktreeAdmin(ctx, Worktree{Path: target.Worktree})
+	if err != nil {
+		return err
+	}
+	child := r
+	child.Dir = filepath.Join(target.Worktree, filepath.FromSlash(target.Path))
+	info, err := os.Lstat(filepath.Join(child.Dir, ".git"))
+	if err != nil {
+		return err
+	}
+	if !info.Mode().IsRegular() || canonicalPath(child.Dir) != child.Dir {
+		return errors.New("submodule checkout or Git pointer is not a regular owned path")
+	}
+	gitDir, err := child.gitDir(ctx)
+	if err != nil {
+		return err
+	}
+	modules := filepath.Join(admin, "modules")
+	if !strings.HasPrefix(gitDir, modules+string(filepath.Separator)) {
+		return errors.New("submodule Git storage is not owned by the linked worktree")
+	}
+	common, err := child.git(ctx, "rev-parse", "--path-format=absolute", "--git-common-dir")
+	if err != nil {
+		return err
+	}
+	if canonicalPath(strings.TrimSuffix(common, "\n")) != gitDir {
+		return errors.New("submodule shares external Git storage")
+	}
+	if err := child.checkSubmoduleStorage(ctx, gitDir); err != nil {
+		return err
+	}
+	top, err := child.git(ctx, "rev-parse", "--show-toplevel")
+	if err != nil {
+		return err
+	}
+	if canonicalPath(strings.TrimSpace(top)) != canonicalPath(child.Dir) {
+		return errors.New("submodule Git storage belongs to a different checkout")
+	}
+	_, err = r.status(ctx, target.Worktree, false)
+	return err
 }
 
 // Remote tracking refs are repairable; local work and cleanup policy must survive.
@@ -176,6 +300,7 @@ func repairAgentCommand(ctx context.Context, agent, dir string, roots []string) 
 	}
 	cmd := exec.CommandContext(ctx, agent, args...)
 	cmd.Dir = dir
+	cmd.Env = append(os.Environ(), "GIT_OPTIONAL_LOCKS=0")
 	cmd.WaitDelay = 2 * time.Second
 	return cmd
 }
@@ -262,7 +387,7 @@ func restrictCodexMCP(ctx context.Context, cmd *exec.Cmd, diagnostics io.Writer)
 	return nil
 }
 
-func runRepairAgent(ctx context.Context, agent, dir, prompt string, timeout time.Duration, r repository) (repairReport, error) {
+func runRepairAgent(ctx context.Context, agent, dir, prompt string, timeout time.Duration, r repository, extraRoots ...string) (repairReport, error) {
 	var report repairReport
 	for name, body := range map[string]string{"prompt.txt": prompt, "schema.json": repairSchema} {
 		if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0600); err != nil {
@@ -286,6 +411,7 @@ func runRepairAgent(ctx context.Context, agent, dir, prompt string, timeout time
 		return report, err
 	}
 	roots := []string{r.Dir, canonicalPath(r.CommonDir)}
+	roots = append(roots, extraRoots...)
 	if canonicalPath(gitDir) != canonicalPath(r.CommonDir) {
 		roots = append(roots, canonicalPath(gitDir))
 	}

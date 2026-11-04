@@ -71,6 +71,20 @@ echo agent >> "$TEST_REPAIR_CALLS"
 printf '%s\n' "$@" > "$TEST_REPAIR_ARGS"
 cat >/dev/null
 case "$TEST_REPAIR_CHANGE" in
+	 submodule) printf '%s\n' "$TEST_SUBMODULE_GITFILE" > "$TEST_SUBMODULE_POINTER" ;;
+	 submodule-modified)
+	   printf '%s\n' "$TEST_SUBMODULE_GITFILE" > "$TEST_SUBMODULE_POINTER"
+	   printf 'changed by agent\n' > "$TEST_SUBMODULE_TRACKED"
+	   ;;
+	 submodule-removed) rm "$TEST_SUBMODULE_POINTER" ;;
+	 submodule-index)
+	   printf '%s\n' "$TEST_SUBMODULE_GITFILE" > "$TEST_SUBMODULE_POINTER"
+	   "$TEST_REAL_GIT" -C "$(dirname "$TEST_SUBMODULE_POINTER")" reset --mixed HEAD
+	   ;;
+	 submodule-storage)
+	   mv "$TEST_SUBMODULE_BACKUP" "$TEST_SUBMODULE_GITDIR"
+	   printf '%s\n' "$TEST_SUBMODULE_GITFILE" > "$TEST_SUBMODULE_POINTER"
+	   ;;
   tracked) printf 'concurrent edit\n' > "$TEST_REPAIR_REPO/tracked" ;;
   branch) "$TEST_REAL_GIT" -C "$TEST_REPAIR_REPO" branch agent-created ;;
   config) "$TEST_REAL_GIT" -C "$TEST_REPAIR_REPO" config tidygit.keep agent-kept ;;
@@ -123,6 +137,100 @@ func repairCallCount(t *testing.T, env string) int {
 }
 
 const repairedReport = `{"status":"repaired","summary":"Repaired remote metadata"}`
+
+func TestRepairMissingSubmoduleMetadata(t *testing.T) {
+	for _, mode := range []string{"restored", "restored-storage", "cached", "no-op", "removed-pointer", "shared", "modified-files", "modified-index", "blocked"} {
+		t.Run(mode, func(t *testing.T) {
+			f, opts := repairFixture(t, "codex", repairedReport, "")
+			other := filepath.Join(f.root, "aaa-completed")
+			otherOID := f.branch("other-completed", other)
+			f.run(f.dir, "-c", "protocol.file.allow=always", "submodule", "add", f.bare, "child")
+			f.run(f.dir, "commit", "-am", "record child")
+			path := filepath.Join(f.root, "completed")
+			oid := f.branch("completed", path)
+			f.run(path, "-c", "protocol.file.allow=always", "submodule", "update", "--init")
+			pointer := filepath.Join(path, "child", ".git")
+			original, err := os.ReadFile(pointer)
+			if err != nil {
+				t.Fatal(err)
+			}
+			tracked := filepath.Join(path, "child", "tracked")
+			gitDir := f.run(filepath.Dir(pointer), "rev-parse", "--absolute-git-dir")
+			f.write(tracked, "staged submodule work\n")
+			f.run(filepath.Dir(pointer), "add", "tracked")
+			f.write(tracked, "local submodule work\n")
+			f.write(pointer, "gitdir: ../../missing-metadata\n")
+			f.pullRequests("MERGED", map[string]string{"completed": oid, "other-completed": otherOID})
+			t.Setenv("TEST_SUBMODULE_POINTER", pointer)
+			t.Setenv("TEST_SUBMODULE_GITFILE", strings.TrimSuffix(string(original), "\n"))
+			t.Setenv("TEST_SUBMODULE_TRACKED", tracked)
+			t.Setenv("TEST_REPAIR_CHANGE", "submodule")
+			switch mode {
+			case "restored-storage":
+				backup := filepath.Join(f.root, "recovered-metadata")
+				if err := os.Rename(gitDir, backup); err != nil {
+					t.Fatal(err)
+				}
+				t.Setenv("TEST_SUBMODULE_BACKUP", backup)
+				t.Setenv("TEST_SUBMODULE_GITDIR", gitDir)
+				t.Setenv("TEST_REPAIR_CHANGE", "submodule-storage")
+			case "cached":
+				plain := opts
+				plain.Fix = false
+				cleanFixtureOptions(t, f, plain)
+				if result := cleanFixtureOptions(t, f, plain); !result.Unchanged {
+					t.Fatal("fixture did not create an unchanged non-fix marker")
+				}
+			case "no-op":
+				t.Setenv("TEST_REPAIR_CHANGE", "")
+			case "removed-pointer":
+				t.Setenv("TEST_REPAIR_CHANGE", "submodule-removed")
+			case "shared":
+				shared := f.run(filepath.Join(f.dir, "child"), "rev-parse", "--absolute-git-dir")
+				t.Setenv("TEST_SUBMODULE_GITFILE", "gitdir: "+shared)
+			case "modified-files":
+				t.Setenv("TEST_REPAIR_CHANGE", "submodule-modified")
+			case "modified-index":
+				t.Setenv("TEST_REPAIR_CHANGE", "submodule-index")
+			case "blocked":
+				t.Setenv("TEST_REPAIR_CHANGE", "")
+				t.Setenv("TEST_REPAIR_REPORT", `{"status":"blocked","summary":"Original metadata cannot be recovered"}`)
+			}
+			result, err := clean(t.Context(), f.repo, opts)
+			if err != nil || repairCallCount(t, "TEST_REPAIR_CALLS") != 1 {
+				t.Fatalf("expected one repair attempt: %+v, %v", result, err)
+			}
+			args, err := os.ReadFile(os.Getenv("TEST_REPAIR_ARGS"))
+			if err != nil || !strings.Contains(string(args), "--add-dir\n"+canonicalPath(path)+"\n") {
+				t.Fatalf("repair agent was not granted the affected worktree: %q, %v", args, err)
+			}
+			wantSuccess := mode == "restored" || mode == "restored-storage" || mode == "cached"
+			if result.Repaired != wantSuccess || (len(result.Errors) == 0) != wantSuccess {
+				t.Fatalf("incorrect repair outcome: %+v", result)
+			}
+			f.assertBranch("completed", true)
+			f.assertBranch("other-completed", false)
+			if mode != "cached" && (result.WorktreesRemoved != 1 || result.WorktreesTotal != 2) {
+				t.Fatalf("lost pre-repair cleanup accounting: %+v", result)
+			}
+			if mode != "modified-files" {
+				if got, err := os.ReadFile(tracked); err != nil || string(got) != "local submodule work\n" {
+					t.Fatalf("local work changed: %q, %v", got, err)
+				}
+			}
+			if wantSuccess {
+				if got := f.run(filepath.Dir(pointer), "show", ":tracked"); got != "staged submodule work" {
+					t.Fatalf("staging changed during repair: %q", got)
+				}
+				if _, err := f.repo.status(t.Context(), path, false); err != nil {
+					t.Fatalf("status still fails after repair: %v", err)
+				}
+			} else if repairCallCount(t, "TEST_FETCH_CALLS") != 1 {
+				t.Fatal("unverified repair resumed cleanup")
+			}
+		})
+	}
+}
 
 func TestRepairCodexMCPRestrictions(t *testing.T) {
 	for _, inventory := range []string{"enabled", "disabled", "http", "managed", "malformed", "unsupported", "null"} {
