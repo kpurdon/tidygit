@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -15,6 +16,110 @@ type submoduleRecovery struct {
 	admin         string
 	modules       map[string]string // Worktree-relative child path to owned Git directory.
 	hasSubmodules bool
+}
+
+func (r repository) symlinkedSubmodule(ctx context.Context, worktree string) (string, error) {
+	entries, err := r.git(ctx, "-C", worktree, "ls-files", "--stage", "-z")
+	if err != nil {
+		return "", err
+	}
+	for entry := range strings.SplitSeq(entries, "\x00") {
+		if !strings.HasPrefix(entry, "160000 ") {
+			continue
+		}
+		_, name, ok := strings.Cut(entry, "\t")
+		if !ok {
+			return "", errors.New("invalid submodule index entry")
+		}
+		local := filepath.FromSlash(name)
+		if err := validArchivePath(local); err != nil {
+			return "", err
+		}
+		path := worktree
+		for component := range strings.SplitSeq(local, string(filepath.Separator)) {
+			if err := ctx.Err(); err != nil {
+				return "", err
+			}
+			path = filepath.Join(path, component)
+			info, err := os.Lstat(path)
+			if errors.Is(err, os.ErrNotExist) {
+				break
+			} else if err != nil {
+				return "", err
+			}
+			if info.Mode()&os.ModeSymlink != 0 {
+				return name, nil
+			}
+			if !info.IsDir() {
+				break
+			}
+		}
+	}
+	return "", nil
+}
+
+// syncInitializedSubmodules follows the current index top-down without creating
+// checkouts or overwriting ignored files, which submodule update would permit.
+func (r repository) syncInitializedSubmodules(ctx context.Context) error {
+	entries, err := r.git(ctx, "ls-files", "--stage", "-z")
+	if err != nil {
+		return err
+	}
+	for entry := range strings.SplitSeq(entries, "\x00") {
+		if !strings.HasPrefix(entry, "160000 ") {
+			continue
+		}
+		header, name, ok := strings.Cut(entry, "\t")
+		fields := strings.Fields(header)
+		if !ok || len(fields) != 3 || fields[2] != "0" {
+			return errors.New("invalid or unmerged submodule index entry")
+		}
+		name = filepath.FromSlash(name)
+		if err := validArchivePath(name); err != nil {
+			return err
+		}
+		child := r
+		child.Dir = filepath.Join(r.Dir, name)
+		if canonicalPath(child.Dir) != child.Dir {
+			return fmt.Errorf("submodule %q has a symlinked path", child.Dir)
+		}
+		if _, err := os.Lstat(filepath.Join(child.Dir, ".git")); errors.Is(err, os.ErrNotExist) {
+			continue
+		} else if err != nil {
+			return err
+		}
+		if operation, err := child.inProgress(ctx); err != nil {
+			return err
+		} else if operation != "" {
+			return fmt.Errorf("submodule %q has %s in progress", child.Dir, operation)
+		}
+		head, err := child.git(ctx, "rev-parse", "HEAD")
+		if err != nil {
+			return err
+		}
+		if strings.TrimSpace(head) != fields[1] {
+			// Nested gitlink drift is expected after updating the containing module.
+			status, err := child.git(ctx, "status", "--porcelain=v1", "--untracked-files=all", "--ignore-submodules=all")
+			if err != nil {
+				return err
+			}
+			if status != "" {
+				return fmt.Errorf("submodule %q has local changes", child.Dir)
+			}
+			if _, err := child.git(ctx, "cat-file", "-e", fields[1]+"^{commit}"); err != nil {
+				if _, err := child.git(ctx, "fetch", "--no-recurse-submodules", "origin", fields[1]); err != nil {
+					return err
+				}
+			}
+			if _, err := child.git(ctx, "checkout", "--no-recurse-submodules", "--detach", "--no-overwrite-ignore", fields[1]); err != nil {
+				return err
+			}
+		}
+		if err := child.syncInitializedSubmodules(ctx); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // submoduleArchivePolicy recognizes only submodules whose complete Git storage
@@ -210,20 +315,71 @@ func (r repository) submoduleRecoveryPlan(ctx context.Context, wt Worktree) (sub
 
 func possibleBareGitStorage(path string) (bool, error) {
 	markers := 0
+	strong := false
 	for _, name := range []string{"HEAD", "objects", "refs", "packed-refs", "config"} {
-		if _, err := os.Lstat(filepath.Join(path, name)); errors.Is(err, os.ErrNotExist) {
+		info, err := os.Lstat(filepath.Join(path, name))
+		if errors.Is(err, os.ErrNotExist) {
 			continue
 		} else if err != nil {
 			return false, err
 		}
-		// Partial or malformed storage still needs manual recovery. Lstat avoids
-		// following symlinked markers into an external object store.
 		markers++
-		if markers >= 2 {
+		strong = strong || name != "objects" && name != "refs" || !info.IsDir()
+	}
+	if markers < 2 || strong {
+		return markers >= 2, nil
+	}
+	// Libraries also use objects/ and refs/. Require recognizable Git data when
+	// these ordinary directory names are the only markers present.
+	objects, err := os.ReadDir(filepath.Join(path, "objects"))
+	if err != nil {
+		return false, err
+	}
+	for _, entry := range objects {
+		if entry.Name() == "info" || entry.Name() == "pack" {
 			return true, nil
 		}
+		if len(entry.Name()) == 2 && (entry.IsDir() || entry.Type()&os.ModeSymlink != 0) {
+			if _, err := hex.DecodeString(entry.Name()); err == nil {
+				return true, nil
+			}
+		}
 	}
-	return false, nil
+	found := false
+	refs := filepath.Join(path, "refs")
+	err = filepath.WalkDir(refs, func(path string, entry fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if path == refs {
+			return nil
+		}
+		if entry.Type()&os.ModeSymlink != 0 || entry.Name() == "heads" || entry.Name() == "tags" || entry.Name() == "remotes" {
+			found = true
+			return filepath.SkipAll
+		}
+		if entry.IsDir() {
+			return nil
+		}
+		info, err := entry.Info()
+		if err != nil {
+			return err
+		}
+		if !info.Mode().IsRegular() || info.Size() > 4096 {
+			return nil
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		value := strings.TrimSpace(string(data))
+		if disposalObjectID(value) || strings.HasPrefix(value, "ref: refs/") {
+			found = true
+			return filepath.SkipAll
+		}
+		return nil
+	})
+	return found, err
 }
 
 func (r repository) checkSubmoduleStorage(ctx context.Context, gitDir string) error {

@@ -21,8 +21,8 @@ type submoduleDisposal struct {
 	fingerprint string
 }
 
-// checkDisposableSubmodules proves recovery from currently advertised remote
-// refs without fetching or changing local refs, indexes, or worktrees.
+// checkDisposableSubmodules verifies recoverable history or disposable remote
+// cache without fetching or changing local refs, indexes, or worktrees.
 func (r repository) checkDisposableSubmodules(ctx context.Context, wt Worktree) error {
 	_, err := r.disposableSubmodulePlan(ctx, wt)
 	return err
@@ -284,16 +284,18 @@ func (r repository) checkDisposableSubmodule(ctx context.Context, admin, recorde
 		}
 		remoteRefs[fields[1]] = fields[0]
 	}
-	refs, err := r.disposalGit(ctx, "", "for-each-ref", "--format=%(refname) %(objectname)")
+	refs, err := r.disposalGit(ctx, "", "for-each-ref", "--format=%(refname)%09%(objectname)%09%(symref)")
 	if err != nil {
 		return err
 	}
-	for line := range strings.SplitSeq(strings.TrimSpace(refs), "\n") {
+	stale := map[string]string{}
+	protected := []string{recorded}
+	for line := range strings.SplitSeq(refs, "\n") {
 		if line == "" {
 			continue
 		}
-		fields := strings.Fields(line)
-		if len(fields) != 2 || !disposalObjectID(fields[1]) {
+		fields := strings.Split(line, "\t")
+		if len(fields) != 3 || !disposalObjectID(fields[1]) {
 			return errors.New("unable to inspect local child refs")
 		}
 		name, oid := fields[0], fields[1]
@@ -309,6 +311,12 @@ func (r repository) checkDisposableSubmodule(ctx context.Context, admin, recorde
 		case strings.HasPrefix(name, "refs/remotes/"):
 		default:
 			return errors.New("stash or custom child refs require preservation")
+		}
+		branch, origin := strings.CutPrefix(name, "refs/remotes/origin/")
+		if origin && branch != "HEAD" && fields[2] == "" && remoteRefs["refs/heads/"+branch] == "" {
+			stale[name] = oid
+		} else {
+			protected = append(protected, oid)
 		}
 	}
 	stored, err := r.disposalGit(ctx, "", "cat-file", "--batch-all-objects", "--batch-check=%(objectname)")
@@ -340,8 +348,110 @@ func (r repository) checkDisposableSubmodule(ctx context.Context, admin, recorde
 	for oid := range strings.FieldsSeq(reachable) {
 		delete(objects, oid)
 	}
+	if len(objects) != 0 && len(stale) != 0 {
+		if err := r.excludeStaleRemoteCache(ctx, admin, stale, protected, objects); err != nil {
+			return err
+		}
+	}
 	if len(objects) != 0 {
 		return fmt.Errorf("%d stored child objects are not recoverable from live origin refs", len(objects))
+	}
+	return nil
+}
+
+// Conventional origin-tracking refs are cache, including clone-created refs
+// without reflogs. Manual ref activity and local reflogs protect both endpoints,
+// including the previous commit of the oldest retained entry.
+func (r repository) excludeStaleRemoteCache(ctx context.Context, admin string, stale map[string]string, protected []string, objects map[string]bool) error {
+	fetch, err := r.disposalGit(ctx, "", "config", "--get-all", "remote.origin.fetch")
+	if err != nil {
+		return err
+	}
+	if strings.TrimSpace(fetch) != "+refs/heads/*:refs/remotes/origin/*" {
+		return nil
+	}
+	if _, err := os.Lstat(filepath.Join(admin, "reftable")); err == nil {
+		return errors.New("reftable reflogs require preservation of stale remote history")
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	for _, name := range []string{"ORIG_HEAD", "AUTO_MERGE"} {
+		data, err := os.ReadFile(filepath.Join(admin, name))
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		} else if err != nil {
+			return err
+		}
+		oid := strings.TrimSpace(string(data))
+		if !disposalObjectID(oid) {
+			return fmt.Errorf("unable to inspect child %s", name)
+		}
+		protected = append(protected, oid)
+	}
+	logs := filepath.Join(admin, "logs")
+	if err := filepath.WalkDir(logs, func(path string, entry fs.DirEntry, walkErr error) error {
+		if errors.Is(walkErr, os.ErrNotExist) && path == logs {
+			return nil
+		}
+		if walkErr != nil {
+			return walkErr
+		}
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if entry.IsDir() {
+			return nil
+		}
+		if !entry.Type().IsRegular() {
+			return errors.New("unsupported child reflog storage")
+		}
+		name, err := filepath.Rel(logs, path)
+		if err != nil {
+			return err
+		}
+		cacheLog := stale[filepath.ToSlash(name)] != ""
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		for line := range strings.SplitSeq(string(data), "\n") {
+			if line == "" {
+				continue
+			}
+			fields := strings.Fields(line)
+			if len(fields) < 2 || !disposalObjectID(fields[0]) || !disposalObjectID(fields[1]) {
+				return errors.New("unable to inspect child reflog endpoints")
+			}
+			_, message, _ := strings.Cut(line, "\t")
+			if cacheLog && (strings.HasPrefix(message, "fetch ") || strings.HasPrefix(message, "fetch:") || strings.HasPrefix(message, "clone: from ")) {
+				continue
+			}
+			for _, oid := range fields[:2] {
+				if strings.Trim(oid, "0") != "" {
+					protected = append(protected, oid)
+				}
+			}
+		}
+		return nil
+	}); err != nil {
+		return err
+	}
+	cache, err := r.disposalGit(ctx, strings.Join(slices.Collect(maps.Values(stale)), "\n")+"\n", "rev-list", "--objects", "--no-object-names", "--stdin")
+	if err != nil {
+		return fmt.Errorf("unable to inspect stale remote history: %w", err)
+	}
+	local, err := r.disposalGit(ctx, strings.Join(protected, "\n")+"\n", "rev-list", "--objects", "--no-object-names", "--stdin")
+	if err != nil {
+		return fmt.Errorf("unable to inspect protected child history: %w", err)
+	}
+	protectedObjects := map[string]bool{}
+	for oid := range strings.FieldsSeq(local) {
+		protectedObjects[oid] = true
+	}
+	for oid := range strings.FieldsSeq(cache) {
+		if !protectedObjects[oid] {
+			delete(objects, oid)
+		}
 	}
 	return nil
 }
