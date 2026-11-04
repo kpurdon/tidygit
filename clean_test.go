@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"io/fs"
 	"os"
 	"os/exec"
@@ -537,7 +538,12 @@ func TestLocalMarkerSkipsNetworkUntilForceOrLocalChange(t *testing.T) {
 	f := newCleanupFixture(t)
 	log := filepath.Join(f.root, "fetches")
 	t.Setenv("TEST_FETCH_LOG", log)
-	f.write(filepath.Join(f.root, "bin", "git"), "#!/bin/sh\nif [ \"$1\" = remote ] && [ \"$2\" = get-url ]; then exec \"$TEST_REAL_GIT\" config --get \"remote.$3.url\"; fi\nif [ \"$1\" = fetch ]; then echo fetch >> \"$TEST_FETCH_LOG\"; fi\nexec \"$TEST_REAL_GIT\" \"$@\"\n")
+	f.write(filepath.Join(f.root, "bin", "git"), `#!/bin/sh
+if [ "$1" = remote ] && [ "$2" = get-url ]; then exec "$TEST_REAL_GIT" config --get "remote.$3.url"; fi
+if [ "$1" = fetch ]; then echo fetch >> "$TEST_FETCH_LOG"; fi
+if [ "$1" = ls-files ] && [ "$2" = --stage ]; then echo scan >> "$TEST_FETCH_LOG"; fi
+exec "$TEST_REAL_GIT" "$@"
+`)
 	first := cleanFixture(t, f, false)
 	if first.Unchanged {
 		t.Fatal("first run skipped")
@@ -547,6 +553,9 @@ func TestLocalMarkerSkipsNetworkUntilForceOrLocalChange(t *testing.T) {
 		t.Fatal("unchanged repository was processed again")
 	}
 	data, err := os.ReadFile(log)
+	if !strings.HasPrefix(string(data), "fetch\n") {
+		t.Fatalf("missing marker triggered an unnecessary startup scan: %q", data)
+	}
 	if err != nil || strings.Count(string(data), "fetch") != 1 {
 		t.Fatalf("unchanged run fetched: %q %v", data, err)
 	}
@@ -558,6 +567,7 @@ func TestLocalMarkerSkipsNetworkUntilForceOrLocalChange(t *testing.T) {
 		t.Fatalf("force did not process: %+v %v", forced, err)
 	}
 	f.branch("new-worktree", filepath.Join(f.root, "new-worktree"))
+	f.run(filepath.Join(f.root, "new-worktree"), "commit", "--allow-empty", "-m", "unfinished work")
 	changed := cleanFixture(t, f, false)
 	if changed.Unchanged {
 		t.Fatal("new worktree did not invalidate marker")
@@ -835,4 +845,81 @@ func TestAutoArchivesStaleStandaloneBranchBeforeDeletingIt(t *testing.T) {
 	if got, err := os.ReadFile(filepath.Join(recovered, "unique")); err != nil || string(got) != "unpublished work\n" {
 		t.Fatalf("deleted branch unrecoverable: %q %v", got, err)
 	}
+}
+
+func TestIntegratedBranchesWithoutPRRespectProtection(t *testing.T) {
+	for _, dry := range []bool{true, false} {
+		t.Run(fmt.Sprint("dry=", dry), func(t *testing.T) {
+			f := newCleanupFixture(t)
+			f.branch("integrated", "")
+			f.branch("integrated-tree", filepath.Join(f.root, "integrated-tree"))
+			open := f.branch("open", "")
+			f.pullRequests("OPEN", map[string]string{"open": open})
+			f.branch("kept", "")
+			f.run(f.dir, "config", "tidygit.keep", "kept")
+			dirty := filepath.Join(f.root, "dirty")
+			f.branch("dirty", dirty)
+			f.write(filepath.Join(dirty, "tracked"), "local work")
+			f.run(f.dir, "switch", "-c", "unique")
+			f.run(f.dir, "commit", "--allow-empty", "-m", "unmerged history")
+			f.run(f.dir, "switch", "main")
+			result := cleanFixture(t, f, dry)
+			if dry {
+				if result.BranchesPlanned != 2 || result.WorktreesPlanned != 1 {
+					t.Fatalf("integrated preview: %+v", result)
+				}
+			} else if result.BranchesDeleted != 2 || result.WorktreesRemoved != 1 {
+				t.Fatalf("integrated cleanup: %+v", result)
+			}
+			for _, name := range []string{"open", "kept", "dirty", "unique"} {
+				f.assertBranch(name, true)
+			}
+			f.assertBranch("integrated", dry)
+			f.assertBranch("integrated-tree", dry)
+		})
+	}
+}
+
+func TestRetainedWorkReportsActivityThreshold(t *testing.T) {
+	f := newCleanupFixture(t)
+	now := time.Now()
+	old := now.Add(-8 * 24 * time.Hour).Truncate(time.Second)
+	t.Setenv("GIT_COMMITTER_DATE", old.Format(time.RFC3339))
+	t.Setenv("GIT_AUTHOR_DATE", old.Format(time.RFC3339))
+	f.run(f.dir, "switch", "-c", "old-unique")
+	f.run(f.dir, "commit", "--allow-empty", "-m", "unmerged history")
+	f.run(f.dir, "switch", "main")
+	for _, name := range []string{"refs/heads/old-unique", "logs/refs/heads/old-unique"} {
+		if err := os.Chtimes(filepath.Join(f.repo.CommonDir, name), old, old); err != nil {
+			t.Fatal(err)
+		}
+	}
+	f.run(f.dir, "branch", "recent-unique", "old-unique")
+	f.run(f.dir, "worktree", "add", "-b", "recent-tree", filepath.Join(f.root, "recent-tree"), "old-unique")
+	out, err := os.CreateTemp(t.TempDir(), "output")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer out.Close()
+	previous := os.Stdout
+	os.Stdout = out
+	defer func() { os.Stdout = previous }()
+	result := cleanFixture(t, f, true)
+	if result.BranchesPlanned != 0 || result.WorktreesPlanned != 0 {
+		t.Fatalf("unmerged work planned without archive: %+v", result)
+	}
+	data, err := os.ReadFile(out.Name())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"8d ago; meets 7d threshold", "0d ago; below 7d threshold", "history not contained in origin/main", "use --archive", "last local activity " + old.Format("2006-01-02")} {
+		if !strings.Contains(string(data), want) {
+			t.Errorf("missing %q in output:\n%s", want, data)
+		}
+	}
+	archived := cleanFixtureWithArchives(t, f, true)
+	if archived.BranchesPlanned != 1 || archived.WorktreesPlanned != 0 {
+		t.Fatalf("default 7d archival should select only the 8d branch: %+v", archived)
+	}
+
 }

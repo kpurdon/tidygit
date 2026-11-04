@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"time"
@@ -51,14 +52,25 @@ func clean(ctx context.Context, r repository, opts options) (result repoResult, 
 	var fingerprint string
 	var scanErr error
 	if !opts.DryRun && !opts.Force {
-		fingerprint, scanErr = localFingerprint(ctx, r, opts)
+		var path string
+		path, scanErr = runMarkerPath(r)
+		if scanErr == nil {
+			_, scanErr = os.Stat(path)
+			if errors.Is(scanErr, os.ErrNotExist) {
+				scanErr = nil
+			} else if scanErr == nil {
+				done := uiSpinner("Checking local marker")
+				fingerprint, scanErr = localFingerprint(ctx, r, opts)
+				done()
+			}
+		}
 	}
 	if err := ctx.Err(); err != nil {
 		return result, err
 	}
 	if scanErr != nil {
 		uiWarn("Unable to check local marker; running cleanup: " + scanErr.Error())
-	} else if !opts.Force && !opts.DryRun {
+	} else if fingerprint != "" {
 		unchanged, err := readRunMarker(r, fingerprint)
 		if err != nil {
 			uiWarn("Unable to read local marker; running cleanup: " + err.Error())
@@ -177,7 +189,9 @@ func cleanRepository(ctx context.Context, r repository, opts options) (result re
 	}
 	var baseline *localState
 	if !opts.DryRun {
+		done := uiSpinner("Recording local state")
 		baseline, err = localSnapshot(ctx, r, opts)
+		done()
 		if err != nil {
 			uiWarn("Unable to record local state for this run: " + err.Error())
 		}
@@ -233,6 +247,7 @@ func cleanRepository(ctx context.Context, r repository, opts options) (result re
 	done := uiSpinner("Checking PRs")
 	prs, err := ghFetchPRs(ctx, r, defaultBranch, lookupCandidates, opts)
 	done()
+	prLookupComplete := err == nil
 	if err != nil {
 		if ctx.Err() != nil {
 			return result, ctx.Err()
@@ -247,6 +262,13 @@ func cleanRepository(ctx context.Context, r repository, opts options) (result re
 		prs = map[string]PR{}
 	}
 	result.PRsFound = len(prs)
+	integrated := map[string]bool{}
+	if prLookupComplete {
+		integrated, err = integratedBranches(ctx, r, defaultBranch, lookupCandidates, prs)
+		if err != nil {
+			return fail("checking integrated branch history", err)
+		}
+	}
 	handled := map[string]bool{}
 	keepBranch := func(name string) {
 		if _, ok := branchByName[name]; ok && !handled[name] {
@@ -291,9 +313,11 @@ func cleanRepository(ctx context.Context, r repository, opts options) (result re
 			}
 		}
 		complete, archiveAll, stale := false, false, false
+		var lastActivity time.Time
+		ageChecked := false
 		if reason == "" {
 			if hasBranch {
-				complete = cleanupKeepReason(pr, b) == ""
+				complete = cleanupKeepReason(pr, b) == "" || integrated[b.Name]
 			} else {
 				pr, complete, archiveAll, err = detachedCompletion(ctx, r, wt, defaultBranch, opts)
 				if err != nil {
@@ -325,7 +349,11 @@ func cleanRepository(ctx context.Context, r repository, opts options) (result re
 				result.addErr("checking worktree", statusErr)
 				reason = "unable to verify files"
 			} else if !complete || status != "" {
-				stale, err = staleWorktree(ctx, r, wt, opts.StaleDays, time.Now())
+				ageChecked = true
+				if opts.StaleDays > 0 {
+					lastActivity, err = worktreeLastActivity(ctx, r, wt)
+				}
+				stale = !lastActivity.IsZero() && activityIsStale(lastActivity, opts.StaleDays, time.Now())
 				if err != nil {
 					result.addErr("checking worktree age", err)
 					reason = "unable to verify last activity"
@@ -336,6 +364,9 @@ func cleanRepository(ctx context.Context, r repository, opts options) (result re
 				} else if opts.Auto || opts.DryRun {
 					if hasBranch {
 						reason = cleanupKeepReason(pr, b)
+						if pr.State == "" && prLookupComplete {
+							reason = "history not contained in origin/" + defaultBranch
+						}
 					} else {
 						reason = "detached worktree is not verified complete or stale"
 					}
@@ -386,6 +417,9 @@ func cleanRepository(ctx context.Context, r repository, opts options) (result re
 			}
 		}
 		if reason != "" {
+			if ageChecked && err == nil {
+				reason += "; " + activityDescription(lastActivity, opts.StaleDays, time.Now())
+			}
 			uiKeep(reason)
 			result.WorktreesSkipped++
 			keepBranch(wt.Branch)
@@ -531,6 +565,8 @@ func cleanRepository(ctx context.Context, r repository, opts options) (result re
 		}
 		reason := ""
 		stale := false
+		var lastActivity time.Time
+		ageChecked := false
 		checkedOut, err := r.checkedOutWorktree(b.Name, remaining)
 		if err != nil {
 			return fail("checking branch ownership", err)
@@ -547,19 +583,29 @@ func cleanRepository(ctx context.Context, r repository, opts options) (result re
 			reason = operationReason
 		} else if pr.State == "OPEN" {
 			reason = "pull request is still open"
-		} else if cleanupKeepReason(pr, b) != "" {
-			stale, err = staleBranch(ctx, r, b, opts.StaleDays, time.Now())
+		} else if cleanupKeepReason(pr, b) != "" && !integrated[b.Name] {
+			ageChecked = true
+			if opts.StaleDays > 0 {
+				lastActivity, err = branchLastActivity(ctx, r, b)
+			}
+			stale = !lastActivity.IsZero() && activityIsStale(lastActivity, opts.StaleDays, time.Now())
 			if err != nil {
 				result.addErr("checking branch age", err)
 				reason = "unable to verify last activity"
 			} else if !stale && (opts.Auto || opts.DryRun) {
 				reason = cleanupKeepReason(pr, b)
+				if pr.State == "" && prLookupComplete {
+					reason = "history not contained in origin/" + defaultBranch
+				}
 			}
 		}
 		if reason == "" && stale && !opts.Archive {
 			reason = "stale branch history requires preservation; use --archive to allow a recovery archive"
 		}
 		if reason != "" {
+			if ageChecked && err == nil {
+				reason += "; " + activityDescription(lastActivity, opts.StaleDays, time.Now())
+			}
 			uiKeep(reason)
 			result.BranchesSkipped++
 			continue
@@ -626,7 +672,9 @@ func cleanRepository(ctx context.Context, r repository, opts options) (result re
 	if baseline != nil && len(result.Errors) == 0 {
 		expected, valid := baseline.AfterCleanup(removedBranches, removedWorktrees)
 		if valid {
+			done := uiSpinner("Verifying local state after cleanup")
 			outcome, scanErr := localSnapshot(ctx, r, opts)
+			done()
 			if scanErr != nil {
 				uiWarn("Unable to verify local state after cleanup: " + scanErr.Error())
 			} else if outcome.Fingerprint() == expected {

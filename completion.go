@@ -8,6 +8,32 @@ import (
 	"strings"
 )
 
+// integratedBranches only admits discovered tips with no matching PR after a
+// successful PR lookup. Ref changes during the query cannot bless a new tip.
+func integratedBranches(ctx context.Context, r repository, base string, branches []Branch, prs map[string]PR) (map[string]bool, error) {
+	pending := map[string]string{}
+	for _, b := range branches {
+		if _, found := prs[b.Name]; !found && b.LocalRepo != "" {
+			pending[b.Name] = b.OID
+		}
+	}
+	result := map[string]bool{}
+	if len(pending) == 0 {
+		return result, nil
+	}
+	out, err := r.git(ctx, "for-each-ref", "--merged=refs/remotes/origin/"+base, "--format=%(refname:strip=2)%00%(objectname)", "refs/heads/")
+	if err != nil {
+		return nil, err
+	}
+	for line := range strings.SplitSeq(strings.TrimSuffix(out, "\n"), "\n") {
+		name, oid, ok := strings.Cut(line, "\x00")
+		if ok && oid != "" && pending[name] == oid {
+			result[name] = true
+		}
+	}
+	return result, nil
+}
+
 // Detached snapshots need independent evidence: ancestry, an exact terminal PR
 // head, or a squash-equivalent change whose complete history will be archived.
 func detachedCompletion(ctx context.Context, r repository, wt Worktree, base string, opts options) (pr PR, complete, archive bool, err error) {

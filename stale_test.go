@@ -259,3 +259,21 @@ func TestNewPackedBranchWithoutReflogIsProtected(t *testing.T) {
 		t.Fatalf("new packed branch considered stale: %v %v", stale, err)
 	}
 }
+
+func TestActivityDescriptionUnknownDisabledAndBoundary(t *testing.T) {
+	now := time.Date(2026, 11, 4, 12, 0, 0, 0, time.UTC)
+	for _, tc := range []struct {
+		last time.Time
+		days int
+		want string
+	}{
+		{time.Time{}, 7, "last local activity unknown; cannot establish 7d inactivity"},
+		{time.Time{}, 0, "age-based cleanup disabled (--stale-days 0)"},
+		{now.Add(-7 * 24 * time.Hour), 7, "last local activity 2026-10-28 (7d ago; meets 7d threshold)"},
+		{now.Add(-7*24*time.Hour + time.Second), 7, "last local activity 2026-10-28 (6d ago; below 7d threshold)"},
+	} {
+		if got := activityDescription(tc.last, tc.days, now); got != tc.want {
+			t.Errorf("description=%q want=%q", got, tc.want)
+		}
+	}
+}

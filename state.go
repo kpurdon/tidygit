@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -42,7 +43,7 @@ func localFingerprintAt(ctx context.Context, r repository, opts options, now tim
 }
 
 // Bump when cleanup eligibility or fingerprint semantics change, not for UI builds.
-const cacheSemanticsVersion = 5
+const cacheSemanticsVersion = 6
 
 type stateRef struct{ OID, Symref string }
 type stateConfig struct {
@@ -144,51 +145,21 @@ func localSnapshotAt(ctx context.Context, r repository, opts options, now time.T
 	}
 	state.base = fmt.Sprintf("%x", h.Sum(nil))
 	state.Worktrees = worktrees
+	trees := make([]string, len(worktrees))
+	if err := parallelSnapshot(ctx, len(worktrees), opts.Jobs, func(ctx context.Context, i int) error {
+		var err error
+		trees[i], err = snapshotWorktree(ctx, r, worktrees[i], opts, now)
+		if err != nil {
+			return fmt.Errorf("snapshot worktree %q: %w", worktrees[i].Path, err)
+		}
+		return nil
+	}); err != nil {
+		return nil, err
+	}
 	checkedOut := map[string]bool{}
-	for _, wt := range worktrees {
+	for i, wt := range worktrees {
 		checkedOut[wt.Branch] = true
-		h := sha256.New()
-		if err := ctx.Err(); err != nil {
-			return nil, err
-		}
-		fingerprintField(h, fmt.Sprintf("%q:%q:%q:%t:%t", wt.Path, wt.Branch, wt.OID, wt.Locked, wt.Prunable))
-		wr := r
-		wr.Dir = wt.Path
-		admin, err := wr.gitDir(ctx)
-		if err != nil {
-			return nil, err
-		}
-		// Index entries, not index timestamps/stat-cache extensions, describe staging.
-		index, err := wr.git(ctx, "ls-files", "--stage", "-v", "-z")
-		if err != nil {
-			return nil, err
-		}
-		fingerprintField(h, index)
-		for _, name := range []string{"HEAD", "config.worktree", "rebase-merge", "rebase-apply", "MERGE_HEAD", "CHERRY_PICK_HEAD", "REVERT_HEAD", "sequencer", "BISECT_START"} {
-			path := filepath.Join(admin, name)
-			if _, err := os.Lstat(path); errors.Is(err, fs.ErrNotExist) {
-				fingerprintField(h, name+":absent")
-				continue
-			} else if err != nil {
-				return nil, err
-			}
-			fingerprintField(h, name)
-			if err := fingerprintTree(ctx, h, path, true); err != nil {
-				return nil, err
-			}
-		}
-		latest, err := fingerprintWorktree(ctx, h, wt.Path)
-		if err != nil {
-			return nil, err
-		}
-		if opts.StaleDays > 0 {
-			latest, err = worktreeMetadataActivity(ctx, wr, latest)
-			if err != nil {
-				return nil, err
-			}
-		}
-		fingerprintField(h, fmt.Sprint(activityIsStale(latest, opts.StaleDays, now)))
-		state.trees[canonicalPath(wt.Path)] = fmt.Sprintf("%x", h.Sum(nil))
+		state.trees[canonicalPath(wt.Path)] = trees[i]
 	}
 	state.Branches, err = r.branches(ctx)
 	if err != nil {
@@ -199,15 +170,101 @@ func localSnapshotAt(ctx context.Context, r repository, opts options, now time.T
 		if !ok || ref.OID != branch.OID {
 			return nil, errors.New("branches changed during snapshot")
 		}
-		if opts.StaleDays > 0 && !checkedOut[branch.Name] {
-			stale, err := staleBranch(ctx, r, branch, opts.StaleDays, now)
-			if err != nil {
-				return nil, err
+	}
+	if opts.StaleDays > 0 {
+		ages := make([]bool, len(state.Branches))
+		if err := parallelSnapshot(ctx, len(state.Branches), opts.Jobs, func(ctx context.Context, i int) error {
+			branch := state.Branches[i]
+			if checkedOut[branch.Name] {
+				return nil
 			}
-			state.branchAges[branch.Name] = stale
+			var err error
+			ages[i], err = staleBranch(ctx, r, branch, opts.StaleDays, now)
+			if err != nil {
+				return fmt.Errorf("snapshot branch %q: %w", branch.Name, err)
+			}
+			return nil
+		}); err != nil {
+			return nil, err
+		}
+		for i, branch := range state.Branches {
+			if !checkedOut[branch.Name] {
+				state.branchAges[branch.Name] = ages[i]
+			}
 		}
 	}
 	return state, nil
+}
+
+func parallelSnapshot(ctx context.Context, count, workers int, scan func(context.Context, int) error) error {
+	ctx, cancel := context.WithCancelCause(ctx)
+	defer cancel(nil)
+	jobs := make(chan int, count)
+	for i := range count {
+		jobs <- i
+	}
+	close(jobs)
+	var wg sync.WaitGroup
+	for range min(count, max(1, workers)) {
+		wg.Go(func() {
+			for i := range jobs {
+				if ctx.Err() != nil {
+					return
+				}
+				if err := scan(ctx, i); err != nil {
+					cancel(err)
+					return
+				}
+			}
+		})
+	}
+	wg.Wait()
+	return context.Cause(ctx)
+}
+
+func snapshotWorktree(ctx context.Context, r repository, wt Worktree, opts options, now time.Time) (string, error) {
+	h := sha256.New()
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+	fingerprintField(h, fmt.Sprintf("%q:%q:%q:%t:%t", wt.Path, wt.Branch, wt.OID, wt.Locked, wt.Prunable))
+	wr := r
+	wr.Dir = wt.Path
+	admin, err := wr.gitDir(ctx)
+	if err != nil {
+		return "", err
+	}
+	// Index entries, not index timestamps/stat-cache extensions, describe staging.
+	index, err := wr.git(ctx, "ls-files", "--stage", "-v", "-z")
+	if err != nil {
+		return "", err
+	}
+	fingerprintField(h, index)
+	for _, name := range []string{"HEAD", "config.worktree", "rebase-merge", "rebase-apply", "MERGE_HEAD", "CHERRY_PICK_HEAD", "REVERT_HEAD", "sequencer", "BISECT_START"} {
+		path := filepath.Join(admin, name)
+		if _, err := os.Lstat(path); errors.Is(err, fs.ErrNotExist) {
+			fingerprintField(h, name+":absent")
+			continue
+		} else if err != nil {
+			return "", err
+		}
+		fingerprintField(h, name)
+		if err := fingerprintTree(ctx, h, path, true); err != nil {
+			return "", err
+		}
+	}
+	latest, err := fingerprintWorktree(ctx, h, wt.Path)
+	if err != nil {
+		return "", err
+	}
+	if opts.StaleDays > 0 {
+		latest, err = worktreeMetadataActivity(ctx, wr, latest)
+		if err != nil {
+			return "", err
+		}
+	}
+	fingerprintField(h, fmt.Sprint(activityIsStale(latest, opts.StaleDays, now)))
+	return fmt.Sprintf("%x", h.Sum(nil)), nil
 }
 
 func fingerprintField(h hash.Hash, value string) { fmt.Fprintf(h, "%d:%s", len(value), value) }

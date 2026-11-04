@@ -95,3 +95,19 @@ func TestDetachedAncestorAndOpenPRProtection(t *testing.T) {
 		t.Fatalf("open PR failed to protect integrated tip: %+v %v %v", pr, complete, err)
 	}
 }
+
+func TestIntegratedBranchesRejectChangedDiscoveryTip(t *testing.T) {
+	f := newCleanupFixture(t)
+	f.run(f.dir, "switch", "-c", "candidate")
+	f.run(f.dir, "commit", "--allow-empty", "-m", "unique history")
+	oid := f.run(f.dir, "rev-parse", "HEAD")
+	f.run(f.dir, "switch", "main")
+	f.run(f.dir, "branch", "-f", "candidate", "main")
+	integrated, err := integratedBranches(t.Context(), f.repo, "main", []Branch{{Name: "candidate", OID: oid, LocalRepo: "github.com/audit/repo"}}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if integrated["candidate"] {
+		t.Fatal("changed branch tip accepted as the discovered history")
+	}
+}

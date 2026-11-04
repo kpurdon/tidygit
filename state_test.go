@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -69,6 +70,63 @@ func TestLocalFingerprintInvalidation(t *testing.T) {
 	assertChanged()
 }
 
+func TestLocalFingerprintIndependentOfWorkerCount(t *testing.T) {
+	f := newCleanupFixture(t)
+	for _, name := range []string{"first", "second", "third"} {
+		path := filepath.Join(f.root, name)
+		f.branch(name, path)
+		f.write(filepath.Join(path, "ignored"), name)
+	}
+	f.branch("standalone", "")
+	opts := defaultOptions()
+	opts.Jobs = 1
+	now := time.Now()
+	want, err := localFingerprintAt(t.Context(), f.repo, opts, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, workers := range []int{0, 4} {
+		opts.Jobs = workers
+		got, err := localFingerprintAt(t.Context(), f.repo, opts, now)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got != want {
+			t.Fatalf("worker count %d changed local fingerprint", workers)
+		}
+	}
+}
+
+func TestParallelSnapshotCancelsAndWaitsAfterFailure(t *testing.T) {
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	started := make(chan struct{})
+	stopped := make(chan struct{})
+	want := errors.New("snapshot failure")
+	err := parallelSnapshot(ctx, 2, 2, func(ctx context.Context, i int) error {
+		if i == 0 {
+			select {
+			case <-started:
+				return want
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+		}
+		close(started)
+		<-ctx.Done()
+		close(stopped)
+		return ctx.Err()
+	})
+	if !errors.Is(err, want) {
+		t.Fatalf("original scan failure lost: %v", err)
+	}
+	select {
+	case <-stopped:
+	default:
+		t.Fatal("returned before the other scan stopped")
+	}
+}
+
 func TestRunMarkerPersistenceAndReadOnlyMiss(t *testing.T) {
 	f := newCleanupFixture(t)
 	state := filepath.Join(t.TempDir(), "state")
@@ -105,8 +163,8 @@ func TestLocalFingerprintErrorsAndMetadata(t *testing.T) {
 	f := newCleanupFixture(t)
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
-	if _, err := localFingerprint(ctx, f.repo, defaultOptions()); err == nil {
-		t.Fatal("cancellation ignored")
+	if _, err := localFingerprint(ctx, f.repo, defaultOptions()); !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancellation ignored: %v", err)
 	}
 	linked := filepath.Join(f.root, "linked")
 	f.run(f.dir, "worktree", "add", "-b", "linked", linked)
