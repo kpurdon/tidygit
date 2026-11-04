@@ -14,6 +14,7 @@ func TestNewlineWorktreePathDoesNotTargetAnotherWorktree(t *testing.T) {
 	unusual := safe + "\nworktree " + safe
 	oid := f.branch("merged", unusual)
 	f.branch("unmerged", safe)
+	f.run(safe, "commit", "--allow-empty", "-m", "unfinished work")
 	f.pullRequests("MERGED", map[string]string{"merged": oid})
 	r := cleanFixture(t, f, false)
 	checkCounts(t, r, 2)

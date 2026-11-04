@@ -46,8 +46,8 @@ func TestParseArgs(t *testing.T) {
 	if defaultOptions().Archive {
 		t.Fatal("archival must be opt-in")
 	}
-	if defaultOptions().StaleDays != 14 {
-		t.Fatal("stale cleanup must default to 14 days")
+	if defaultOptions().StaleDays != 7 {
+		t.Fatal("stale cleanup must default to 7 days")
 	}
 	if defaultOptions().Fix || defaultOptions().AgentTimeout != 5*time.Minute {
 		t.Fatal("agent repair must default to disabled with a five-minute timeout")

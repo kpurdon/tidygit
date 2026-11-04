@@ -119,18 +119,23 @@ func staleBranch(ctx context.Context, r repository, b Branch, days int, now time
 	if days <= 0 {
 		return false, nil
 	}
+	last, err := branchLastActivity(ctx, r, b)
+	return !last.IsZero() && activityIsStale(last, days, now), err
+}
+
+func branchLastActivity(ctx context.Context, r repository, b Branch) (time.Time, error) {
 	out, err := r.git(ctx, "log", "-1", "--format=%ct", "refs/heads/"+b.Name, "--")
 	if err != nil {
-		return false, err
+		return time.Time{}, err
 	}
 	seconds, err := strconv.ParseInt(strings.TrimSpace(out), 10, 64)
 	if err != nil {
-		return false, fmt.Errorf("read branch commit time: %w", err)
+		return time.Time{}, fmt.Errorf("read branch commit time: %w", err)
 	}
 	latest := time.Unix(seconds, 0)
 	event, err := reflogLastActivity(ctx, r, "refs/heads/"+b.Name)
 	if err != nil {
-		return false, err
+		return time.Time{}, err
 	}
 	if event.After(latest) {
 		latest = event
@@ -139,18 +144,33 @@ func staleBranch(ctx context.Context, r repository, b Branch, days int, now time
 	// Packing removes loose refs; its global file timestamp is not activity.
 	info, err := os.Lstat(filepath.Join(r.CommonDir, "refs", "heads", filepath.FromSlash(b.Name)))
 	if err != nil && !errors.Is(err, fs.ErrNotExist) {
-		return false, err
+		return time.Time{}, err
 	}
 	if errors.Is(err, fs.ErrNotExist) && event.IsZero() {
 		// Packing can erase the only creation timestamp of a newly created
 		// branch with reflogs disabled. Commit age cannot prove branch age.
-		return false, nil
+		return time.Time{}, nil
 	}
 	if err == nil && info.ModTime().After(latest) {
 		latest = info.ModTime()
 	}
 
-	return activityIsStale(latest, days, now), nil
+	return latest, nil
+}
+
+func activityDescription(last time.Time, days int, now time.Time) string {
+	if days <= 0 {
+		return "age-based cleanup disabled (--stale-days 0)"
+	}
+	if last.IsZero() {
+		return fmt.Sprintf("last local activity unknown; cannot establish %dd inactivity", days)
+	}
+	age := max(time.Duration(0), now.Sub(last)/(24*time.Hour))
+	comparison := "below"
+	if activityIsStale(last, days, now) {
+		comparison = "meets"
+	}
+	return fmt.Sprintf("last local activity %s (%dd ago; %s %dd threshold)", last.Format("2006-01-02"), age, comparison, days)
 }
 
 // Reflog file mtimes change during expiration/repacking. Only event timestamps

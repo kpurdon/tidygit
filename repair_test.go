@@ -146,8 +146,11 @@ func TestRepairRetryProvidersAndMarker(t *testing.T) {
 	for _, agent := range []string{"codex", "claude"} {
 		t.Run(agent, func(t *testing.T) {
 			f, opts := repairFixture(t, agent, repairedReport, "remote-ref")
-			oid := f.branch("local-only", "")
+			f.run(f.dir, "switch", "-c", "local-only")
+			f.run(f.dir, "commit", "--allow-empty", "-m", "unfinished local work")
+			oid := f.run(f.dir, "rev-parse", "HEAD")
 			f.run(f.dir, "tag", "local-tag")
+			f.run(f.dir, "switch", "main")
 			f.run(f.dir, "update-ref", "refs/remotes/origin/stale", oid)
 			t.Setenv("TEST_REPAIR_CHANGE", "remote")
 			result, err := clean(t.Context(), f.repo, opts)

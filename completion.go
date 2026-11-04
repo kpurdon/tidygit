@@ -4,9 +4,50 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 )
+
+// integratedBranches only admits discovered tips with no matching PR after a
+// successful PR lookup. Ref changes during the query cannot bless a new tip.
+func integratedBranches(ctx context.Context, r repository, base string, branches []Branch, prs map[string]PR) (map[string]bool, error) {
+	pending := map[string]string{}
+	for _, b := range branches {
+		if _, found := prs[b.Name]; !found && b.LocalRepo != "" {
+			pending[b.Name] = b.OID
+		}
+	}
+	result := map[string]bool{}
+	if len(pending) == 0 {
+		return result, nil
+	}
+	grafts := os.Getenv("GIT_GRAFT_FILE")
+	if grafts == "" {
+		grafts = filepath.Join(r.CommonDir, "info", "grafts")
+	} else if !filepath.IsAbs(grafts) {
+		grafts = filepath.Join(r.Dir, grafts)
+	}
+	// --no-replace-objects does not disable graft files. Rewritten ancestry
+	// cannot establish that the remote preserves a branch's original history.
+	if info, err := os.Stat(grafts); err == nil && info.Size() > 0 {
+		return result, nil
+	} else if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return nil, err
+	}
+	out, err := r.git(ctx, "--no-replace-objects", "for-each-ref", "--merged=refs/remotes/origin/"+base, "--format=%(refname:strip=2)%00%(objectname)", "refs/heads/")
+	if err != nil {
+		return nil, err
+	}
+	for line := range strings.SplitSeq(strings.TrimSuffix(out, "\n"), "\n") {
+		name, oid, ok := strings.Cut(line, "\x00")
+		if ok && oid != "" && pending[name] == oid {
+			result[name] = true
+		}
+	}
+	return result, nil
+}
 
 // Detached snapshots need independent evidence: ancestry, an exact terminal PR
 // head, or a squash-equivalent change whose complete history will be archived.
