@@ -365,7 +365,7 @@ func cleanRepository(ctx context.Context, r repository, opts options) (result re
 					if hasBranch {
 						reason = cleanupKeepReason(pr, b)
 						if pr.State == "" && prLookupComplete {
-							reason = "history not contained in origin/" + defaultBranch
+							reason = "history not verified in origin/" + defaultBranch
 						}
 					} else {
 						reason = "detached worktree is not verified complete or stale"
@@ -595,7 +595,7 @@ func cleanRepository(ctx context.Context, r repository, opts options) (result re
 			} else if !stale && (opts.Auto || opts.DryRun) {
 				reason = cleanupKeepReason(pr, b)
 				if pr.State == "" && prLookupComplete {
-					reason = "history not contained in origin/" + defaultBranch
+					reason = "history not verified in origin/" + defaultBranch
 				}
 			}
 		}

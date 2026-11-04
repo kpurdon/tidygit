@@ -111,3 +111,36 @@ func TestIntegratedBranchesRejectChangedDiscoveryTip(t *testing.T) {
 		t.Fatal("changed branch tip accepted as the discovered history")
 	}
 }
+
+func TestIntegratedBranchesIgnoreRewrittenAncestry(t *testing.T) {
+	for _, rewrite := range []string{"replace", "graft", "environment-graft"} {
+		t.Run(rewrite, func(t *testing.T) {
+			f := newCleanupFixture(t)
+			f.run(f.dir, "switch", "-c", "unique")
+			f.run(f.dir, "commit", "--allow-empty", "-m", "unique history")
+			tip := f.run(f.dir, "rev-parse", "HEAD")
+			f.run(f.dir, "switch", "main")
+			base := f.run(f.dir, "rev-parse", "HEAD")
+			if rewrite == "replace" {
+				fake := f.run(f.dir, "commit-tree", "HEAD^{tree}", "-p", tip, "-m", "rewritten base")
+				f.run(f.dir, "replace", base, fake)
+			} else {
+				path := filepath.Join(f.repo.CommonDir, "info", "grafts")
+				if rewrite == "environment-graft" {
+					path = filepath.Join(f.dir, "custom-grafts")
+					t.Setenv("GIT_GRAFT_FILE", "custom-grafts")
+				}
+				f.write(path, base+" "+tip+"\n")
+			}
+			// The local rewrite makes ordinary Git ancestry claim integration.
+			f.run(f.dir, "merge-base", "--is-ancestor", tip, "origin/main")
+			integrated, err := integratedBranches(t.Context(), f.repo, "main", []Branch{{Name: "unique", OID: tip, LocalRepo: "github.com/audit/repo"}}, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if integrated["unique"] {
+				t.Fatal("rewritten ancestry authorized removal of unique history")
+			}
+		})
+	}
+}

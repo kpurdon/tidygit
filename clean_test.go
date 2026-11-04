@@ -149,6 +149,9 @@ func cleanFixtureOptions(t *testing.T, f *cleanupFixture, opts options) repoResu
 func TestCleanupBranchTrackingDefaultSkipsReleaseHistory(t *testing.T) {
 	f := newCleanupFixture(t)
 	f.run(f.dir, "branch", "--track", "feature", "origin/main")
+	f.run(f.dir, "switch", "feature")
+	f.run(f.dir, "commit", "--allow-empty", "-m", "unfinished feature")
+	f.run(f.dir, "switch", "main")
 	f.pullRequests("MERGED", map[string]string{"main": f.run(f.dir, "rev-parse", "main")})
 	f.write(filepath.Join(f.root, "bin", "gh"), `#!/bin/sh
 if [ "$1" = api ]; then
@@ -912,7 +915,7 @@ func TestRetainedWorkReportsActivityThreshold(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"8d ago; meets 7d threshold", "0d ago; below 7d threshold", "history not contained in origin/main", "use --archive", "last local activity " + old.Format("2006-01-02")} {
+	for _, want := range []string{"8d ago; meets 7d threshold", "0d ago; below 7d threshold", "history not verified in origin/main", "use --archive", "last local activity " + old.Format("2006-01-02")} {
 		if !strings.Contains(string(data), want) {
 			t.Errorf("missing %q in output:\n%s", want, data)
 		}
