@@ -42,6 +42,8 @@ func newCleanupFixture(t *testing.T) *cleanupFixture {
 	t.Setenv("GIT_COMMITTER_EMAIL", "test@example.com")
 	f.run(f.root, "init", "--bare", "--initial-branch=main", f.bare)
 	f.run(f.root, "init", "--initial-branch=main", f.dir)
+	// Background maintenance races with fixture metadata timestamps and snapshots.
+	f.run(f.dir, "config", "maintenance.auto", "false")
 	f.write(filepath.Join(f.dir, "tracked"), "base\n")
 	f.write(filepath.Join(f.dir, ".gitignore"), "ignored\n")
 	f.run(f.dir, "add", ".")
