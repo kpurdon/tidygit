@@ -43,7 +43,7 @@ func localFingerprintAt(ctx context.Context, r repository, opts options, now tim
 }
 
 // Bump when cleanup eligibility or fingerprint semantics change, not for UI builds.
-const cacheSemanticsVersion = 7
+const cacheSemanticsVersion = 8
 
 type stateRef struct{ OID, Symref string }
 type stateConfig struct {
@@ -67,7 +67,7 @@ func localSnapshot(ctx context.Context, r repository, opts options) (*localState
 func localSnapshotAt(ctx context.Context, r repository, opts options, now time.Time) (*localState, error) {
 	state := &localState{refs: map[string]stateRef{}, trees: map[string]string{}, branchAges: map[string]bool{}}
 	h := sha256.New()
-	fingerprintField(h, fmt.Sprintf("v%d:%s:%s:%t:%t:%d:%s:%d:%t:%t", cacheSemanticsVersion, canonicalPath(r.CommonDir), canonicalPath(r.ProtectedPath), opts.Auto, opts.Rebase, opts.PRLimit, opts.PRAuthor, opts.StaleDays, opts.Archive, opts.Fix))
+	fingerprintField(h, fmt.Sprintf("v%d:%s:%s:%t:%t:%d:%s:%d:%t", cacheSemanticsVersion, canonicalPath(r.CommonDir), canonicalPath(r.ProtectedPath), opts.Auto, opts.Rebase, opts.PRLimit, opts.PRAuthor, opts.StaleDays, opts.Fix))
 	raw, err := r.git(ctx, "for-each-ref", "--format=%(refname)%00%(objectname)%00%(symref)")
 	if err != nil {
 		return nil, err

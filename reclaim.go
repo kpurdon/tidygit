@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"strings"
+	"time"
 )
 
 // disposableWorktree requires clean source and recoverable submodule history.
@@ -71,5 +72,28 @@ func (r repository) removeDisposableWorktree(ctx context.Context, wt Worktree, b
 	}
 	args = append(args, "--", wt.Path)
 	_, err = r.git(ctx, args...)
+	return err
+}
+
+// removeStaleWorktree deliberately discards files only after rechecking inactivity,
+// worktree identity, and the absence of child repository storage.
+func (r repository) removeStaleWorktree(ctx context.Context, wt Worktree, b Branch, hasBranch bool, days int) error {
+	if err := r.checkWorktreeIdentity(ctx, wt, b, hasBranch); err != nil {
+		return err
+	}
+	if hasModules, err := r.submoduleStoragePolicy(ctx, wt); err != nil {
+		return err
+	} else if hasModules {
+		return errors.New("stale submodule worktrees require manual cleanup")
+	}
+	if stale, err := staleWorktree(ctx, r, wt, days, time.Now()); err != nil {
+		return err
+	} else if !stale {
+		return errors.New("worktree activity changed; keeping local work")
+	}
+	if err := r.checkWorktreeIdentity(ctx, wt, b, hasBranch); err != nil {
+		return err
+	}
+	_, err := r.git(ctx, "worktree", "remove", "--force", "--", wt.Path)
 	return err
 }

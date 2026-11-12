@@ -160,7 +160,6 @@ Transcript directory: ` + dir + "\n\n" + string(input)
 	result.WorktreesRemoved += original.WorktreesRemoved
 	result.BranchesTotal += original.BranchesDeleted
 	result.BranchesDeleted += original.BranchesDeleted
-	result.Archives = append(original.Archives, result.Archives...)
 	result.RepairLog = dir
 	result.Repaired = returnedErr == nil && len(result.Errors) == 0 && ctx.Err() == nil
 	return result, returnedErr
@@ -267,7 +266,7 @@ func newRepairDirectory(worktrees []Worktree) (string, error) {
 	}
 	base = filepath.Join(base, "repairs")
 	for _, wt := range worktrees {
-		if err := recoveryOutsideWorktree(wt.Path, base); err != nil {
+		if err := stateOutsideWorktree(wt.Path, base); err != nil {
 			return "", fmt.Errorf("repair transcripts need an external directory; set XDG_STATE_HOME outside worktree %q: %w", wt.Path, err)
 		}
 	}

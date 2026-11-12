@@ -56,9 +56,7 @@ func TestLocalFingerprintInvalidation(t *testing.T) {
 	assertChanged()
 	f.run(f.dir, "worktree", "add", "-b", "linked", filepath.Join(f.root, "linked"))
 	assertChanged()
-	opts.Auto = true
-	assertChanged()
-	opts.Archive = true
+	opts.Auto = false
 	assertChanged()
 	opts.DryRun = true
 	if next := fingerprint(); next != previous {

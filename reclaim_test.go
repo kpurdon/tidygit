@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func TestCompletedWorktreeDiscardsIgnoredData(t *testing.T) {
@@ -33,9 +34,6 @@ func TestCompletedWorktreeDiscardsIgnoredData(t *testing.T) {
 			}
 			f.pullRequests("MERGED", map[string]string{"completed": oid})
 			result := cleanFixture(t, f, mode == "dry-run")
-			if len(result.Archives) != 0 {
-				t.Fatalf("default cleanup created archives: %+v", result)
-			}
 			if mode == "remove" || mode == "unique-config" {
 				if result.WorktreesRemoved != 1 || result.BranchesDeleted != 1 {
 					t.Fatalf("completed disposable checkout retained: %+v", result)
@@ -65,7 +63,7 @@ func TestCompletedWorktreeDiscardsIgnoredData(t *testing.T) {
 	}
 }
 
-func TestCompletedRecoverableSubmoduleWorktreeRemovedWithoutArchive(t *testing.T) {
+func TestCompletedRecoverableSubmoduleWorktreeRemoved(t *testing.T) {
 	f := newCleanupFixture(t)
 	f.run(f.dir, "-c", "protocol.file.allow=always", "submodule", "add", f.bare, "child")
 	f.run(f.dir, "commit", "-am", "add recoverable child")
@@ -76,7 +74,7 @@ func TestCompletedRecoverableSubmoduleWorktreeRemovedWithoutArchive(t *testing.T
 	f.write(filepath.Join(path, "child", "ignored"), "disposable child environment\n")
 	f.pullRequests("MERGED", map[string]string{"completed": oid})
 	result := cleanFixture(t, f, false)
-	if result.WorktreesRemoved != 1 || result.BranchesDeleted != 1 || len(result.Archives) != 0 {
+	if result.WorktreesRemoved != 1 || result.BranchesDeleted != 1 {
 		t.Fatalf("recoverable submodule worktree not reclaimed: %+v", result)
 	}
 	if _, err := os.Stat(path); !os.IsNotExist(err) {
@@ -205,5 +203,60 @@ exec "$TEST_REAL_GIT" "$@"
 	}
 	if got, err := os.ReadFile(filepath.Join(wt.Path, "tracked")); err != nil || string(got) != "new hidden source\n" {
 		t.Fatalf("source data changed: %q, %v", got, err)
+	}
+}
+
+func TestStaleRemovalRechecksActivityAndProtection(t *testing.T) {
+	for _, change := range []string{"activity", "locked", "branch", "nested repository", "submodule"} {
+		t.Run(change, func(t *testing.T) {
+			f := newCleanupFixture(t)
+			old := time.Now().Add(-45 * 24 * time.Hour).Truncate(time.Second)
+			t.Setenv("GIT_COMMITTER_DATE", old.Format(time.RFC3339))
+			t.Setenv("GIT_AUTHOR_DATE", old.Format(time.RFC3339))
+			path := filepath.Join(f.root, "stale")
+			f.branch("stale", path)
+			f.run(path, "commit", "--allow-empty", "-m", "old work")
+			oid := f.run(path, "rev-parse", "HEAD")
+			wt := Worktree{Path: path, Branch: "stale", OID: oid}
+			b := Branch{Name: "stale", OID: oid}
+			linked := f.repo
+			linked.Dir = path
+			admin, err := linked.gitDir(t.Context())
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, root := range []string{path, admin} {
+				if err := filepath.WalkDir(root, func(path string, _ os.DirEntry, err error) error {
+					if err != nil {
+						return err
+					}
+					return os.Chtimes(path, old, old)
+				}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if stale, err := staleWorktree(t.Context(), f.repo, wt, 7, time.Now()); err != nil || !stale {
+				t.Fatalf("expected stale fixture: %v %v", stale, err)
+			}
+			switch change {
+			case "activity":
+				f.write(filepath.Join(path, "ignored"), "recent activity")
+			case "locked":
+				f.run(f.dir, "worktree", "lock", path)
+			case "branch":
+				f.run(path, "commit", "--allow-empty", "-m", "changed tip")
+			case "nested repository":
+				f.run(path, "init", "nested")
+			case "submodule":
+				f.run(path, "-c", "protocol.file.allow=always", "submodule", "add", f.bare, "child")
+			}
+			if err := f.repo.removeStaleWorktree(t.Context(), wt, b, true, 7); err == nil {
+				t.Fatal("changed worktree was removed")
+			}
+			f.assertBranch("stale", true)
+			if _, err := os.Stat(filepath.Join(path, "tracked")); err != nil {
+				t.Fatal(err)
+			}
+		})
 	}
 }
