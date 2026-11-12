@@ -27,9 +27,11 @@ func (p operationProtection) branchReason(r repository, name string) (string, er
 func (r repository) operationProtection(ctx context.Context, worktrees []Worktree) (operationProtection, error) {
 	protection := operationProtection{worktrees: map[string]string{}}
 	for _, wt := range worktrees {
-		linked := r
-		linked.Dir = wt.Path
-		state, err := linked.inProgress(ctx)
+		admin, _, err := r.worktreeGitDir(ctx, wt)
+		if err != nil {
+			return protection, err
+		}
+		state, err := operationInProgress(admin)
 		if err != nil {
 			return protection, err
 		}
@@ -59,10 +61,6 @@ func (r repository) operationProtection(ctx context.Context, worktrees []Worktre
 			if err := protectRef("refs/heads/" + wt.Branch); err != nil {
 				return protection, err
 			}
-		}
-		admin, err := linked.gitDir(ctx)
-		if err != nil {
-			return protection, err
 		}
 		for _, dir := range []string{"rebase-merge", "rebase-apply"} {
 			path := filepath.Join(admin, dir)

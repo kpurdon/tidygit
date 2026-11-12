@@ -311,11 +311,67 @@ func (r repository) gitDir(ctx context.Context) (string, error) {
 	return strings.TrimSuffix(out, "\n"), err
 }
 
+// worktreeGitDir resolves retained metadata even when a linked checkout is
+// unavailable. Git's prunable flag also covers a missing .git pointer in an
+// otherwise existing directory; that directory must not be treated as a repo.
+func (r repository) worktreeGitDir(ctx context.Context, wt Worktree) (admin string, available bool, err error) {
+	if err := ctx.Err(); err != nil {
+		return "", false, err
+	}
+	_, pointerErr := os.Stat(filepath.Join(wt.Path, ".git"))
+	if !wt.Prunable && pointerErr == nil {
+		linked := r
+		linked.Dir = wt.Path
+		admin, err := linked.gitDir(ctx)
+		return admin, true, err
+	}
+	if pointerErr != nil && !errors.Is(pointerErr, os.ErrNotExist) {
+		return "", false, pointerErr
+	}
+	root := filepath.Join(r.CommonDir, "worktrees")
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		return "", false, err
+	}
+	for _, entry := range entries {
+		if err := ctx.Err(); err != nil {
+			return "", false, err
+		}
+		if !entry.IsDir() {
+			continue
+		}
+		candidate := filepath.Join(root, entry.Name())
+		data, err := os.ReadFile(filepath.Join(candidate, "gitdir"))
+		if err != nil {
+			return "", false, err
+		}
+		backref := strings.TrimRight(string(data), "\r\n")
+		if !filepath.IsAbs(backref) {
+			backref = filepath.Join(candidate, backref)
+		}
+		if canonicalPath(backref) != canonicalPath(filepath.Join(wt.Path, ".git")) {
+			continue
+		}
+		if admin != "" {
+			return "", false, fmt.Errorf("multiple Git directories registered for %s", wt.Path)
+		}
+		admin = candidate
+	}
+	if admin == "" {
+		return "", false, fmt.Errorf("no Git directory registered for unavailable worktree %s", wt.Path)
+	}
+	return admin, false, nil
+}
+
 func (r repository) inProgress(ctx context.Context) (string, error) {
 	dir, err := r.gitDir(ctx)
 	if err != nil {
 		return "", err
 	}
+	return operationInProgress(dir)
+}
+
+func operationInProgress(dir string) (string, error) {
 	for _, name := range []string{"rebase-merge", "rebase-apply", "MERGE_HEAD", "CHERRY_PICK_HEAD", "REVERT_HEAD", "sequencer", "BISECT_START"} {
 		if _, err := os.Stat(filepath.Join(dir, name)); err == nil {
 			return name, nil
