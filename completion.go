@@ -50,23 +50,23 @@ func integratedBranches(ctx context.Context, r repository, base string, branches
 }
 
 // Detached snapshots need independent evidence: ancestry, an exact terminal PR
-// head, or a squash-equivalent change whose complete history will be archived.
-func detachedCompletion(ctx context.Context, r repository, wt Worktree, base string, opts options) (pr PR, complete, archive bool, err error) {
+// head, or a squash-equivalent change from a verified merged PR.
+func detachedCompletion(ctx context.Context, r repository, wt Worktree, base string, opts options) (pr PR, complete bool, err error) {
 	raw, err := r.git(ctx, "remote", "get-url", "origin")
 	if err != nil {
-		return pr, false, false, err
+		return pr, false, err
 	}
 	source, err := githubRepo(raw)
 	if err != nil {
-		return pr, false, false, err
+		return pr, false, err
 	}
 	associated, err := ghAssociatedPRs(ctx, r, wt.OID, opts)
 	if err != nil {
-		return pr, false, false, err
+		return pr, false, err
 	}
 	ancestor, err := r.isAncestor(ctx, wt.OID, "refs/remotes/origin/"+base)
 	if err != nil {
-		return pr, false, false, err
+		return pr, false, err
 	}
 	var evidence PR
 	for _, candidate := range associated {
@@ -75,10 +75,10 @@ func detachedCompletion(ctx context.Context, r repository, wt Worktree, base str
 		}
 		verified, verifyErr := ghVerifyPRHistory(ctx, r, candidate, opts)
 		if verifyErr != nil {
-			return pr, false, false, verifyErr
+			return pr, false, verifyErr
 		}
 		if verified.State == "OPEN" {
-			return verified, false, false, nil
+			return verified, false, nil
 		}
 		if ancestor {
 			continue
@@ -99,31 +99,31 @@ func detachedCompletion(ctx context.Context, r repository, wt Worktree, base str
 				if exit, ok := errors.AsType[*exec.ExitError](lookupErr); ok && exit.ExitCode() == 1 {
 					continue
 				}
-				return pr, false, false, lookupErr
+				return pr, false, lookupErr
 			}
 			integrated, checkErr := r.isAncestor(ctx, pr.MergeCommit.OID, "refs/remotes/origin/"+base)
 			if checkErr != nil {
-				return pr, false, false, checkErr
+				return pr, false, checkErr
 			}
 			if integrated {
 				equal, checkErr := r.sameSquashPatch(ctx, wt.OID, pr.MergeCommit.OID)
 				if checkErr != nil {
-					return pr, false, false, checkErr
+					return pr, false, checkErr
 				}
 				if equal && !complete {
-					complete, archive = true, true
+					complete = true
 					evidence = pr
 				}
 			}
 		}
 	}
 	if ancestor {
-		return PR{}, true, false, nil
+		return PR{}, true, nil
 	}
 	if complete {
-		return evidence, complete, archive, nil
+		return evidence, complete, nil
 	}
-	return pr, false, false, nil
+	return pr, false, nil
 }
 
 func (r repository) isAncestor(ctx context.Context, tip, base string) (bool, error) {

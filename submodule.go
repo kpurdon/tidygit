@@ -41,7 +41,7 @@ submodules:
 			return "", errors.New("invalid submodule index entry")
 		}
 		local := filepath.FromSlash(name)
-		if err := validArchivePath(local); err != nil {
+		if err := validSubmodulePath(local); err != nil {
 			return "", err
 		}
 		path := worktree
@@ -114,7 +114,7 @@ func (r repository) syncInitializedSubmodules(ctx context.Context) error {
 			return errors.New("invalid or unmerged submodule index entry")
 		}
 		name = filepath.FromSlash(name)
-		if err := validArchivePath(name); err != nil {
+		if err := validSubmodulePath(name); err != nil {
 			return err
 		}
 		child := r
@@ -161,9 +161,9 @@ func (r repository) syncInitializedSubmodules(ctx context.Context) error {
 	return nil
 }
 
-// submoduleArchivePolicy recognizes only submodules whose complete Git storage
+// submoduleStoragePolicy recognizes only submodules whose complete Git storage
 // belongs to this linked worktree. Other nested repositories remain protected.
-func (r repository) submoduleArchivePolicy(ctx context.Context, wt Worktree) (bool, error) {
+func (r repository) submoduleStoragePolicy(ctx context.Context, wt Worktree) (bool, error) {
 	plan, err := r.submoduleRecoveryPlan(ctx, wt)
 	return plan.hasSubmodules, err
 }
@@ -239,7 +239,7 @@ func (r repository) submoduleRecoveryPlan(ctx context.Context, wt Worktree) (sub
 				return errors.New("invalid submodule index entry")
 			}
 			name = filepath.FromSlash(name)
-			if err := validArchivePath(name); err != nil {
+			if err := validSubmodulePath(name); err != nil {
 				return err
 			}
 			path := filepath.Join(dir, name)
@@ -328,7 +328,7 @@ func (r repository) submoduleRecoveryPlan(ctx context.Context, wt Worktree) (sub
 		}
 		if strings.EqualFold(entry.Name(), ".git") {
 			if !allowed[path] {
-				return fmt.Errorf("nested Git repository %q requires separate recovery archival", filepath.Dir(path))
+				return fmt.Errorf("nested Git repository %q requires manual cleanup", filepath.Dir(path))
 			}
 			if entry.IsDir() {
 				return filepath.SkipDir
@@ -445,7 +445,7 @@ func (r repository) checkSubmoduleStorage(ctx context.Context, gitDir string) er
 			return err
 		}
 	} else if strings.TrimSpace(config) != "" {
-		return errors.New("partial-clone/promisor storage requires separate archival")
+		return errors.New("partial-clone/promisor storage requires manual cleanup")
 	}
 	return filepath.WalkDir(gitDir, func(path string, entry fs.DirEntry, err error) error {
 		if err != nil {

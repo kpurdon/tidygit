@@ -17,31 +17,29 @@ Or build from source with `go build -o tidygit .`. CI tests Linux and macOS with
 ```sh
 tidygit                         # Tidy the current repository
 tidygit all [dir]               # Tidy repositories in a directory
-tidygit --auto                  # Remove completed worktrees, including ignored files
-tidygit --auto --archive        # Also allow recovery archives before removal
-tidygit --auto all [dir]
+tidygit --interactive           # Opt in to a prompt before each removal
 tidygit --dry-run               # Preview without changing repository state
 tidygit --force                 # Recheck even when local state is unchanged
-tidygit --archive --stale-days 7 # Archive work inactive for at least 7 days
+tidygit --stale-days 14         # Delete unfinished work after 14 inactive days
 tidygit --stale-days 0          # Disable cleanup based on age
 tidygit --rebase                # Opt in to rebasing the default branch
 tidygit --help
 tidygit --version
 ```
 
-The default branch updates with a fast-forward-only merge after fetching. Initialized submodules follow the recorded revisions after branch switches and updates; collisions with ignored files stop the update rather than overwrite those files. Interactive removal prompts default to **No**. Automatic removal accepts merged PRs and PRs closed without merging, provided the PR head repository and commit match the local branch. PR lookup checks the local branch name before its tracked parent, and can resolve renamed branches by commit or conventional `pr123`/`pr-123` names. Detached worktrees can be removed when their tip is already on the default branch or matches a terminal PR. Squash-equivalent snapshots require a verified merged PR and `--archive` to preserve a complete recovery archive before removal. Named branches without a matching PR can also be removed when their exact tip is contained in the fetched default branch. Open PRs remain protected.
+The default branch updates with a fast-forward-only merge after fetching. Initialized submodules follow the recorded revisions after branch switches and updates; collisions with ignored files stop the update rather than overwrite those files. Cleanup runs automatically without prompting by default. With `--interactive`, removal prompts default to **No**. Automatic removal accepts merged PRs and PRs closed without merging, provided the PR head repository and commit match the local branch. PR lookup checks the local branch name before its tracked parent, and can resolve renamed branches by commit or conventional `pr123`/`pr-123` names. Detached worktrees can be removed when their tip is already on the default branch or matches a terminal PR. Squash-equivalent snapshots can also be removed when a verified merged PR proves completion. Named branches without a matching PR can also be removed when their exact tip is contained in the fetched default branch. Open PRs remain protected.
 
-With `--archive`, worktrees and standalone branches with no open PR become eligible after **7 days without activity**, configurable with `--stale-days N`; `0` disables age-based cleanup. Activity includes commits, checkout/ref updates, staged edits, and file/directory modification times, including ignored files. Retention messages report the last known activity and configured threshold; unknown activity age remains protected. A recently created worktree at an old commit is still recent. Reflog maintenance and ref packing do not reset the inactivity clock; recorded reflog events do. Stale worktrees are moved whole into a private archive with a self-contained Git bundle and staging snapshot; stale standalone branches are bundled before deletion. Tracked edits, untracked files, and ignored files remain recoverable. Submodules, nested repositories, incomplete history, and archival failures prevent automatic stale removal.
+Worktrees and standalone branches with no open PR become eligible for deletion after **7 days without activity**, configurable with `--stale-days N`; `0` disables age-based cleanup. Expired work is deleted directly, including unmerged local history, staged and unstaged edits, untracked files, and ignored files. Tidygit does not create recovery archives. Activity includes commits, checkout/ref updates, staged edits, and file/directory modification times, including ignored files. Retention messages report the last known activity and configured threshold; unknown activity age remains protected. A recently created worktree at an old commit is still recent. Reflog maintenance and ref packing do not reset the inactivity clock; recorded reflog events do.
 
-Archiving is disabled by default. Verified-completed worktrees with clean tracked and untracked source are removed together with all ignored files, including dependency environments, caches, reports, and local configuration. Use `--archive` to retain recovery copies of those files instead. Unfinished source and Git history that cannot be safely recovered stay in place with a `KEPT` explanation. Archives live under `${XDG_STATE_HOME:-~/.local/state}/tidygit/archives`, include recovery instructions, and are never automatically expired. Their locations appear during cleanup, not in the summary. Worktree archival is supported on macOS and Linux and requires the archive to be on the same filesystem. A failure retains original files or reports their recoverable archive location. The primary checkout and its ignored files, the current checkout, default branch, and locked worktrees are protected. An active Git operation protects its worktree and affected branches, including branches scheduled for rebase updates; unrelated completed work can still be removed. Cleanup invoked from a checkout with an active operation stops before updating it. Rebasing is skipped when local files, including ignored files, are present. Automatic cleanup fails when required GitHub evidence is unavailable.
+Verified-completed worktrees with clean tracked and untracked source are removed together with all ignored files, including dependency environments, caches, reports, and local configuration. Recent unfinished work stays in place with a `KEPT` explanation. The primary checkout and its ignored files, the current checkout, default branch, and locked worktrees are protected. An active Git operation protects its worktree and affected branches, including branches scheduled for rebase updates; unrelated completed work can still be removed. Cleanup invoked from a checkout with an active operation stops before updating it. Rebasing is skipped when local files, including ignored files, are present. Automatic cleanup fails when required GitHub evidence is unavailable.
 
-Clean, verified-completed worktrees with initialized submodules can be removed without archives when stored child objects are recoverable from currently advertised origin branches or tags, or belong exclusively to cached history of deleted origin branches. Cached history still used by local refs or checkout history remains protected. Unique local refs, stashes, changes, unclassified objects, unreadable history, and unverifiable remote state prevent removal. With `--archive`, the entire checkout and its owned submodule Git storage are preserved before removal instead. Shared or external submodule storage and unsupported nested repositories are retained with a `KEPT` explanation. Submodule worktrees with local changes or without verified completion remain for manual cleanup.
+Clean, verified-completed worktrees with initialized submodules can be removed when stored child objects are recoverable from currently advertised origin branches or tags, or belong exclusively to cached history of deleted origin branches. Cached history still used by local refs or checkout history remains protected. Unique local refs, stashes, changes, unclassified objects, unreadable history, and unverifiable remote state prevent removal. Shared or external submodule storage and unsupported nested repositories are retained with a `KEPT` explanation. Expired worktrees containing submodule storage remain for manual cleanup.
 
 To reserve a branch and its worktree for manual cleanup, add its exact name to the repository configuration: `git config --local --add tidygit.keep my-branch`. Repeat for additional branches. Remove an exemption with `git config --local --fixed-value --unset-all tidygit.keep my-branch`. Git's `worktree lock` also protects a worktree.
 
 Packed branches without surviving reflog events or an individual update timestamp have unknown activity age and remain for manual cleanup.
 
-Successful runs record local state under `${XDG_STATE_HOME:-~/.local/state}/tidygit/runs`. Repeat runs skip repositories whose refs, worktrees, staging, configuration, file metadata, and stale eligibility are unchanged. Crossing the inactivity threshold triggers a fresh run without `--force`. There is no PR cache or remote check for skipped repositories: use `--force` to notice PRs merged or closed only on GitHub. File-content changes preserving both size and modification time also require `--force`. Force bypasses the marker, never deletion safeguards. Dry runs always inspect repositories and never write markers or archives.
+Successful runs record local state under `${XDG_STATE_HOME:-~/.local/state}/tidygit/runs`. Repeat runs skip repositories whose refs, worktrees, staging, configuration, file metadata, and stale eligibility are unchanged. Crossing the inactivity threshold triggers a fresh run without `--force`. There is no PR cache or remote check for skipped repositories: use `--force` to notice PRs merged or closed only on GitHub. File-content changes preserving both size and modification time also require `--force`. Force bypasses the marker, never deletion safeguards. Dry runs always inspect repositories and never write markers.
 
 Every run ends with a summary of removals, retained work, and failures. Output keeps terminal scrollback, wraps to your terminal width, and honors `NO_COLOR`. In prompts, use `y`/`n`, arrows and Enter, Esc to keep the item, or `q`/Ctrl+C to cancel the run.
 
@@ -50,8 +48,9 @@ Every run ends with a summary of removals, retained work, and failures. Output k
 | Option | Default | Purpose |
 |--------|---------|---------|
 | `--pr-limit N` | `100` | Maximum PRs per batch or targeted lookup |
-| `--archive` | Off | Allow recovery archives before removing work that needs preservation |
-| `--stale-days N` | `7` | With `--archive`, archive inactive work before removal; `0` disables age-based cleanup |
+| `--auto` | On | Clean without prompting |
+| `--interactive` | Off | Prompt before each removal |
+| `--stale-days N` | `7` | Delete inactive work and its local files/history; `0` disables age-based cleanup |
 | `--exclude-pr-filtering` | Off | Remove the default `@me` author filter from the initial batch; targeted fallback lookups include other authors regardless |
 | `--timeout duration` | `30s` | Timeout for each Git/GitHub command |
 | `--agent-timeout duration` | `5m` | Timeout for each agent repair attempt |
@@ -63,7 +62,7 @@ Install and authenticate Codex or Claude Code, select it with Git configuration,
 
 ```sh
 git config --global tidygit.agent codex  # or claude
-tidygit --auto --fix
+tidygit --fix
 ```
 
 `--fix` allows one agent repair attempt per repository when default-branch detection, fetching, or the initial PR lookup fails, or when an eligible linked worktree has a submodule pointer to missing Git metadata. The agent can inspect the repository and use shell and file tools to repair local Git metadata, including problems such as case-colliding remote-tracking refs. It is instructed to preserve local work and configuration, avoid history rewrites and remote writes, and report unresolved problems. Before resuming cleanup, tidygit checks repository identity, local refs, worktrees, staging, file metadata, and configuration, then reruns normal cleanup checks. `--dry-run` never invokes the agent.
@@ -79,7 +78,6 @@ Repair transcripts are saved under `${XDG_STATE_HOME:-~/.local/state}/tidygit/re
 ```zsh
 alias git_clean='tidygit'
 alias git_clean_all='tidygit all'
-alias git_clean_auto='tidygit --auto all'
 ```
 
 [MIT license](LICENSE).

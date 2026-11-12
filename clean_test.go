@@ -127,15 +127,7 @@ func checkCounts(t *testing.T, r repoResult, want int) {
 func cleanFixture(t *testing.T, f *cleanupFixture, dry bool) repoResult {
 	t.Helper()
 	opts := defaultOptions()
-	opts.Auto = true
 	opts.DryRun = dry
-	return cleanFixtureOptions(t, f, opts)
-}
-
-func cleanFixtureWithArchives(t *testing.T, f *cleanupFixture, dry bool) repoResult {
-	t.Helper()
-	opts := defaultOptions()
-	opts.Auto, opts.Archive, opts.DryRun = true, true, dry
 	return cleanFixtureOptions(t, f, opts)
 }
 
@@ -145,6 +137,10 @@ func cleanFixtureOptions(t *testing.T, f *cleanupFixture, opts options) repoResu
 	if err != nil || len(r.Errors) > 0 {
 		t.Fatalf("clean: %v, %+v", err, r)
 	}
+	if _, err := os.Stat(filepath.Join(f.root, "state", "tidygit", "archives")); !os.IsNotExist(err) {
+		t.Fatalf("cleanup created archive state: %v", err)
+	}
+
 	return r
 }
 
@@ -232,7 +228,7 @@ func TestAutoPreservesDirtyAndNewerWork(t *testing.T) {
 			f.pullRequests(state, prs)
 			r := cleanFixture(t, f, false)
 			checkCounts(t, r, 6)
-			if r.BranchesDeleted != 2 || r.WorktreesRemoved != 2 || len(r.Archives) != 0 {
+			if r.BranchesDeleted != 2 || r.WorktreesRemoved != 2 {
 				t.Fatalf("unexpected deletions: %+v", r)
 			}
 			for name := range prs {
@@ -244,19 +240,6 @@ func TestAutoPreservesDirtyAndNewerWork(t *testing.T) {
 				}
 			}
 
-			f.branch("ignored", filepath.Join(f.root, "ignored"))
-			f.write(filepath.Join(f.root, "ignored", "ignored"), "keep me\n")
-			r = cleanFixtureWithArchives(t, f, false)
-			if r.BranchesDeleted != 1 || r.WorktreesRemoved != 1 {
-				t.Fatalf("explicit archival did not clean ignored worktree: %+v", r)
-			}
-			if len(r.Archives) != 1 {
-				t.Fatalf("missing ignored-file archive: %+v", r)
-			}
-			archived, err := os.ReadFile(filepath.Join(r.Archives[0], "files", "ignored"))
-			if err != nil || string(archived) != "keep me\n" {
-				t.Fatalf("ignored data lost: %q %v", archived, err)
-			}
 			for _, kind := range []string{"tracked", "untracked"} {
 				body, err := os.ReadFile(filepath.Join(f.root, kind, kind))
 				if err != nil || string(body) != "keep me\n" {
@@ -319,16 +302,11 @@ func TestDryRunDoesNotMutateRepository(t *testing.T) {
 	}
 	before := snapshot()
 	r := cleanFixture(t, f, true)
-	if r.BranchesPlanned != 1 || r.WorktreesPlanned != 1 || len(r.Archives) != 0 {
+	if r.BranchesPlanned != 1 || r.WorktreesPlanned != 1 {
 		t.Fatalf("default preview missed completed worktree removal: %+v", r)
 	}
 	if !reflect.DeepEqual(before, snapshot()) {
 		t.Fatal("default dry run changed repository files, index, or refs")
-	}
-	r = cleanFixtureWithArchives(t, f, true)
-	after := snapshot()
-	if !reflect.DeepEqual(before, after) {
-		t.Fatal("dry run changed repository files, index, or refs")
 	}
 	checkCounts(t, r, 1)
 	if r.BranchesPlanned != 1 || r.WorktreesPlanned != 1 {
@@ -517,28 +495,6 @@ func TestClosedPRCleanup(t *testing.T) {
 	}
 }
 
-func TestArchiveFailureKeepsWorktree(t *testing.T) {
-	f := newCleanupFixture(t)
-	path := filepath.Join(f.root, "closed")
-	oid := f.branch("closed", path)
-	f.pullRequests("CLOSED", map[string]string{"closed": oid})
-	f.write(filepath.Join(path, "ignored"), "precious\n")
-	if err := os.MkdirAll(filepath.Join(f.root, "state", "tidygit"), 0700); err != nil {
-		t.Fatal(err)
-	}
-	f.write(filepath.Join(f.root, "state", "tidygit", "archives"), "blocks archive directory")
-	opts := defaultOptions()
-	opts.Auto, opts.Archive = true, true
-	r, err := clean(t.Context(), f.repo, opts)
-	if err != nil || len(r.Errors) == 0 || r.WorktreesRemoved != 0 || r.BranchesDeleted != 0 {
-		t.Fatalf("archive failure not retained: %+v, %v", r, err)
-	}
-	f.assertBranch("closed", true)
-	if data, err := os.ReadFile(filepath.Join(path, "ignored")); err != nil || string(data) != "precious\n" {
-		t.Fatalf("original data lost: %q %v", data, err)
-	}
-}
-
 func TestLocalMarkerSkipsNetworkUntilForceOrLocalChange(t *testing.T) {
 	f := newCleanupFixture(t)
 	log := filepath.Join(f.root, "fetches")
@@ -701,7 +657,7 @@ func TestUnwritableMarkerStopsForcedCleanup(t *testing.T) {
 	}
 }
 
-func TestArchiveNestedIgnoredDirectoriesAndPreservePrimaryEnv(t *testing.T) {
+func TestDiscardNestedIgnoredDirectoriesAndPreservePrimaryEnv(t *testing.T) {
 	f := newCleanupFixture(t)
 	f.write(filepath.Join(f.dir, ".gitignore"), ".envrc\n**/charts/*.tgz\n")
 	f.run(f.dir, "commit", "-am", "ignore environment and chart artifacts")
@@ -723,15 +679,9 @@ func TestArchiveNestedIgnoredDirectoriesAndPreservePrimaryEnv(t *testing.T) {
 		}
 		f.write(target, data)
 	}
-	r := cleanFixtureWithArchives(t, f, false)
-	if r.WorktreesRemoved != 1 || r.BranchesDeleted != 1 || len(r.Archives) != 1 {
+	r := cleanFixture(t, f, false)
+	if r.WorktreesRemoved != 1 || r.BranchesDeleted != 1 {
 		t.Fatalf("ignored directory prevented cleanup: %+v", r)
-	}
-	for name, want := range contents {
-		got, err := os.ReadFile(filepath.Join(r.Archives[0], "files", filepath.FromSlash(name)))
-		if err != nil || string(got) != want {
-			t.Fatalf("archive lost %q: %q %v", name, got, err)
-		}
 	}
 	got, err := os.ReadFile(filepath.Join(f.dir, ".envrc"))
 	if err != nil || string(got) != "primary environment\n" {
@@ -743,7 +693,7 @@ func TestArchiveNestedIgnoredDirectoriesAndPreservePrimaryEnv(t *testing.T) {
 	}
 }
 
-func TestAutoArchivesStaleDirtyWorkAndRetainsActiveProtectedWork(t *testing.T) {
+func TestDefaultDeletesStaleDirtyWorkAndRetainsActiveProtectedWork(t *testing.T) {
 	f := newCleanupFixture(t)
 	t.Setenv("XDG_STATE_HOME", filepath.Join(f.root, "state"))
 	old := time.Now().Add(-45 * 24 * time.Hour).Truncate(time.Second)
@@ -781,29 +731,29 @@ func TestAutoArchivesStaleDirtyWorkAndRetainsActiveProtectedWork(t *testing.T) {
 	}
 	f.run(f.dir, "config", "--add", "tidygit.keep", "keep")
 	f.pullRequests("OPEN", map[string]string{"open": oids["open"]})
-	kept := cleanFixture(t, f, false)
-	if kept.WorktreesRemoved != 0 || kept.BranchesDeleted != 0 || len(kept.Archives) != 0 {
-		t.Fatalf("stale work changed without --archive: %+v", kept)
-	}
-	for name, oid := range oids {
-		f.assertBranch(name, true)
-		if got := f.run(filepath.Join(f.root, name), "rev-parse", "HEAD"); got != oid {
-			t.Fatalf("retained %s history changed: %s", name, got)
+	for _, days := range []int{0, 60, 7} {
+		opts := defaultOptions()
+		opts.StaleDays, opts.DryRun = days, true
+		preview := cleanFixtureOptions(t, f, opts)
+		want := 0
+		if days == 7 {
+			want = 1
+		}
+		if preview.WorktreesPlanned != want || preview.BranchesPlanned != want {
+			t.Fatalf("%dd expiry preview: %+v", days, preview)
+		}
+		for name := range oids {
+			f.assertBranch(name, true)
 		}
 	}
-	result := cleanFixtureWithArchives(t, f, false)
-	if result.WorktreesRemoved != 1 || result.BranchesDeleted != 1 || len(result.Archives) != 1 {
+
+	result := cleanFixture(t, f, false)
+	if result.WorktreesRemoved != 1 || result.BranchesDeleted != 1 {
 		t.Fatalf("cleanup counts: %+v", result)
 	}
 	f.assertBranch("stale-dirty", false)
 	if _, err := os.Stat(filepath.Join(f.root, "stale-dirty")); !os.IsNotExist(err) {
 		t.Fatalf("stale worktree retained: %v", err)
-	}
-	archive := result.Archives[0]
-	for _, name := range []string{"tracked", "untracked", "ignored"} {
-		if _, err := os.Stat(filepath.Join(archive, "files", "stale-dirty", name)); err != nil {
-			t.Fatalf("archived %s missing: %v", name, err)
-		}
 	}
 	for _, name := range []string{"recent", "open", "keep"} {
 		f.assertBranch(name, true)
@@ -813,7 +763,7 @@ func TestAutoArchivesStaleDirtyWorkAndRetainsActiveProtectedWork(t *testing.T) {
 	}
 }
 
-func TestAutoArchivesStaleStandaloneBranchBeforeDeletingIt(t *testing.T) {
+func TestDefaultDeletesStaleStandaloneBranch(t *testing.T) {
 	f := newCleanupFixture(t)
 	t.Setenv("XDG_STATE_HOME", filepath.Join(f.root, "state"))
 	old := time.Now().Add(-45 * 24 * time.Hour).Truncate(time.Second)
@@ -823,33 +773,31 @@ func TestAutoArchivesStaleStandaloneBranchBeforeDeletingIt(t *testing.T) {
 	f.write(filepath.Join(f.dir, "unique"), "unpublished work\n")
 	f.run(f.dir, "add", "unique")
 	f.run(f.dir, "commit", "-m", "old unpublished work")
-	oid := f.run(f.dir, "rev-parse", "HEAD")
 	f.run(f.dir, "switch", "main")
 	for _, name := range []string{"refs/heads/old", "logs/refs/heads/old"} {
 		if err := os.Chtimes(filepath.Join(f.repo.CommonDir, filepath.FromSlash(name)), old, old); err != nil {
 			t.Fatal(err)
 		}
 	}
-	kept := cleanFixture(t, f, false)
-	if kept.BranchesDeleted != 0 || len(kept.Archives) != 0 {
-		t.Fatalf("stale history changed without --archive: %+v", kept)
+	for _, days := range []int{0, 60, 7} {
+		opts := defaultOptions()
+		opts.StaleDays, opts.DryRun = days, true
+		preview := cleanFixtureOptions(t, f, opts)
+		want := 0
+		if days == 7 {
+			want = 1
+		}
+		if preview.BranchesPlanned != want {
+			t.Fatalf("%dd expiry preview: %+v", days, preview)
+		}
+		f.assertBranch("old", true)
 	}
-	f.assertBranch("old", true)
-	if got := f.run(f.dir, "rev-parse", "old"); got != oid {
-		t.Fatalf("retained branch history changed: %s", got)
-	}
-	result := cleanFixtureWithArchives(t, f, false)
-	if result.BranchesDeleted != 1 || len(result.Archives) != 1 {
+
+	result := cleanFixture(t, f, false)
+	if result.BranchesDeleted != 1 {
 		t.Fatalf("cleanup counts: %+v", result)
 	}
 	f.assertBranch("old", false)
-	recovered := filepath.Join(f.root, "recovered")
-	f.run(f.root, "init", recovered)
-	f.run(recovered, "fetch", filepath.Join(result.Archives[0], "history.bundle"), "refs/heads/old")
-	f.run(recovered, "checkout", "--detach", oid)
-	if got, err := os.ReadFile(filepath.Join(recovered, "unique")); err != nil || string(got) != "unpublished work\n" {
-		t.Fatalf("deleted branch unrecoverable: %q %v", got, err)
-	}
 }
 
 func TestIntegratedBranchesWithoutPRRespectProtection(t *testing.T) {
@@ -910,21 +858,16 @@ func TestRetainedWorkReportsActivityThreshold(t *testing.T) {
 	os.Stdout = out
 	defer func() { os.Stdout = previous }()
 	result := cleanFixture(t, f, true)
-	if result.BranchesPlanned != 0 || result.WorktreesPlanned != 0 {
-		t.Fatalf("unmerged work planned without archive: %+v", result)
+	if result.BranchesPlanned != 1 || result.WorktreesPlanned != 0 {
+		t.Fatalf("default expiry did not select old branch: %+v", result)
 	}
 	data, err := os.ReadFile(out.Name())
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"8d ago; meets 7d threshold", "0d ago; below 7d threshold", "history not verified in origin/main", "use --archive", "last local activity " + old.Format("2006-01-02")} {
+	for _, want := range []string{"0d ago; below 7d threshold", "history not verified in origin/main"} {
 		if !strings.Contains(string(data), want) {
 			t.Errorf("missing %q in output:\n%s", want, data)
 		}
 	}
-	archived := cleanFixtureWithArchives(t, f, true)
-	if archived.BranchesPlanned != 1 || archived.WorktreesPlanned != 0 {
-		t.Fatalf("default 7d archival should select only the 8d branch: %+v", archived)
-	}
-
 }

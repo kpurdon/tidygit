@@ -242,7 +242,7 @@ func TestOperationProtectionRefreshesBeforeWorktreeRemoval(t *testing.T) {
 	}
 	f.write(filepath.Join(state, "head-name"), "refs/heads/rebasing\n")
 	f.write(filepath.Join(state, "git-rebase-todo"), "update-ref refs/heads/finished\n")
-	if err := f.repo.removeWorktree(t.Context(), wt, b, true); err == nil {
+	if err := f.repo.removeDisposableWorktree(t.Context(), wt, b, true); err == nil {
 		t.Fatal("removed a worktree newly targeted by another rebase")
 	}
 	f.assertBranch("finished", true)

@@ -19,7 +19,6 @@ type repoResult struct {
 	Duration                                                             time.Duration
 	Canceled                                                             bool
 	Unchanged                                                            bool
-	Archives                                                             []string
 	Errors                                                               []string
 	RepairLog                                                            string
 	Repaired                                                             bool
@@ -313,14 +312,14 @@ func cleanRepository(ctx context.Context, r repository, opts options) (result re
 				return fail("checking operation branch ownership", err)
 			}
 		}
-		complete, archiveAll, stale := false, false, false
+		complete, stale := false, false
 		var lastActivity time.Time
 		ageChecked := false
 		if reason == "" {
 			if hasBranch {
 				complete = cleanupKeepReason(pr, b) == "" || integrated[b.Name]
 			} else {
-				pr, complete, archiveAll, err = detachedCompletion(ctx, r, wt, defaultBranch, opts)
+				pr, complete, err = detachedCompletion(ctx, r, wt, defaultBranch, opts)
 				if err != nil {
 					result.addErr("checking detached worktree completion", err)
 					reason = "unable to verify completion"
@@ -333,7 +332,6 @@ func cleanRepository(ctx context.Context, r repository, opts options) (result re
 		if reason == "" && pr.State == "OPEN" {
 			reason = "pull request is still open"
 		}
-		var ignored []string
 		disposable := false
 		if reason == "" {
 			submoduleReason, pathErr := r.submoduleKeepReason(ctx, wt.Path)
@@ -365,11 +363,9 @@ func cleanRepository(ctx context.Context, r repository, opts options) (result re
 				if err != nil {
 					result.addErr("checking worktree age", err)
 					reason = "unable to verify last activity"
-				} else if stale {
-					archiveAll = true
-				} else if status != "" {
+				} else if !stale && status != "" {
 					reason = "modified or untracked files; not stale"
-				} else if opts.Auto || opts.DryRun {
+				} else if !stale && (opts.Auto || opts.DryRun) {
 					if hasBranch {
 						reason = cleanupKeepReason(pr, b)
 						if pr.State == "" && prLookupComplete {
@@ -382,37 +378,19 @@ func cleanRepository(ctx context.Context, r repository, opts options) (result re
 			}
 		}
 
-		if reason == "" && complete && !stale && !archiveAll && !opts.Archive {
+		if reason == "" && !stale {
 			if _, err := r.disposableWorktree(ctx, wt, b, hasBranch); err != nil {
-				reason = "completed worktree needs preservation: " + err.Error()
+				reason = "worktree needs manual cleanup: " + err.Error()
 			} else {
 				disposable = true
 			}
 		}
-		if reason == "" && !disposable {
-			hasSubmodules, policyErr := r.submoduleArchivePolicy(ctx, wt)
-			if policyErr != nil {
+		if reason == "" && stale {
+			if hasSubmodules, policyErr := r.submoduleStoragePolicy(ctx, wt); policyErr != nil {
 				reason = "submodule or nested repository needs manual cleanup: " + policyErr.Error()
 			} else if hasSubmodules {
-				if !complete || stale {
-					reason = "submodule worktrees require clean, verified completion before archiving"
-				} else {
-					archiveAll = true
-				}
+				reason = "stale submodule worktrees require manual cleanup"
 			}
-		}
-		if reason == "" && !archiveAll && !disposable {
-			var err error
-			ignored, err = ignoredPaths(ctx, r, wt.Path)
-			if err != nil {
-				result.addErr("checking ignored files", err)
-				reason = "unable to verify ignored files"
-			} else if len(ignored) > 0 && !complete {
-				reason = "ignored files require verified completion or stale archival"
-			}
-		}
-		if reason == "" && !opts.Archive && (archiveAll || len(ignored) > 0) {
-			reason = "local files or Git history require preservation; use --archive to allow recovery archives"
 		}
 		if reason == "" {
 			linked := r
@@ -437,16 +415,11 @@ func cleanRepository(ctx context.Context, r repository, opts options) (result re
 			uiLocalCommits(ctx, r, defaultBranch, b)
 		}
 		if stale {
-			uiAction("STALE", fmt.Sprintf("inactive for at least %d days; archiving before removal", opts.StaleDays))
+			uiAction("STALE", fmt.Sprintf("inactive for at least %d days; discarding local files and history", opts.StaleDays))
 		}
 		if opts.DryRun {
 			if disposable {
 				uiAction("WOULD DISCARD", "ignored files in the completed worktree")
-			}
-			if archiveAll {
-				uiAction("WOULD ARCHIVE", "complete worktree, staging, and Git history")
-			} else if len(ignored) > 0 {
-				uiAction("WOULD ARCHIVE", "ignored files outside the worktree")
 			}
 			uiAction("WOULD REMOVE", "worktree "+wt.Path)
 			result.WorktreesPlanned++
@@ -467,11 +440,8 @@ func cleanRepository(ctx context.Context, r repository, opts options) (result re
 				title = "Remove this completed worktree, discard ignored files, and delete its branch?"
 			}
 		}
-		if len(ignored) > 0 {
-			title = "Archive ignored files, remove this worktree, and delete its branch?"
-		}
-		if archiveAll {
-			title = "Archive all files and Git history, then remove this worktree?"
+		if stale {
+			title = "Remove this stale worktree, discard all local files, and delete its branch?"
 		}
 		yes, err := approve(ctx, title, opts.Auto)
 		if err != nil {
@@ -484,58 +454,17 @@ func cleanRepository(ctx context.Context, r repository, opts options) (result re
 			continue
 		}
 
-		if archiveAll {
-			if stale {
-				stillStale, ageErr := staleWorktree(ctx, r, wt, opts.StaleDays, time.Now())
-				if ageErr != nil || !stillStale {
-					if ageErr != nil {
-						result.addErr("rechecking worktree age", ageErr)
-					}
-					uiKeep("worktree activity changed; keeping local work")
-					result.WorktreesSkipped++
-					keepBranch(wt.Branch)
-					continue
-				}
-			}
-			archivePath, archiveErr := r.archiveStaleWorktree(ctx, wt, b, hasBranch)
-			if archivePath != "" {
-				result.Archives = append(result.Archives, archivePath)
-				uiAction("ARCHIVED", "worktree and Git history → "+archivePath)
-			}
-			if archiveErr != nil {
-				result.addErr("archiving worktree", archiveErr)
-				result.WorktreesSkipped++
-				keepBranch(wt.Branch)
-				continue
-			}
-		} else if len(ignored) > 0 {
-			archivePath, err := r.archiveWorktree(ctx, wt, b, hasBranch)
-			if archivePath != "" {
-				result.Archives = append(result.Archives, archivePath)
-			}
-			if err != nil {
-				result.addErr("archiving ignored files", err)
-				result.WorktreesSkipped++
-				keepBranch(wt.Branch)
-				continue
-			}
-			if archivePath != "" {
-				uiAction("ARCHIVED", "ignored files → "+archivePath)
-			}
+		var removeErr error
+		if stale {
+			removeErr = r.removeStaleWorktree(ctx, wt, b, hasBranch, opts.StaleDays)
+		} else {
+			removeErr = r.removeDisposableWorktree(ctx, wt, b, hasBranch)
 		}
-		if !archiveAll {
-			var err error
-			if disposable {
-				err = r.removeDisposableWorktree(ctx, wt, b, hasBranch)
-			} else {
-				err = r.removeWorktree(ctx, wt, b, hasBranch)
-			}
-			if err != nil {
-				result.addErr("removing worktree", err)
-				result.WorktreesSkipped++
-				keepBranch(wt.Branch)
-				continue
-			}
+		if removeErr != nil {
+			result.addErr("removing worktree", removeErr)
+			result.WorktreesSkipped++
+			keepBranch(wt.Branch)
+			continue
 		}
 		uiAction("REMOVED", "worktree")
 		result.WorktreesRemoved++
@@ -607,9 +536,6 @@ func cleanRepository(ctx context.Context, r repository, opts options) (result re
 				}
 			}
 		}
-		if reason == "" && stale && !opts.Archive {
-			reason = "stale branch history requires preservation; use --archive to allow a recovery archive"
-		}
 		if reason != "" {
 			if ageChecked && err == nil {
 				reason += "; " + activityDescription(lastActivity, opts.StaleDays, time.Now())
@@ -622,12 +548,9 @@ func cleanRepository(ctx context.Context, r repository, opts options) (result re
 			uiLocalCommits(ctx, r, defaultBranch, b)
 		}
 		if stale {
-			uiAction("STALE", fmt.Sprintf("inactive for at least %d days; archiving before deletion", opts.StaleDays))
+			uiAction("STALE", fmt.Sprintf("inactive for at least %d days; deleting local history", opts.StaleDays))
 		}
 		if opts.DryRun {
-			if stale {
-				uiAction("WOULD ARCHIVE", "branch Git history")
-			}
 			uiAction("WOULD DELETE", "branch "+b.Name+" at "+shortOID(b.OID))
 			result.BranchesPlanned++
 			continue
@@ -648,16 +571,6 @@ func cleanRepository(ctx context.Context, r repository, opts options) (result re
 					result.addErr("rechecking branch age", ageErr)
 				}
 				uiKeep("branch activity changed")
-				result.BranchesSkipped++
-				continue
-			}
-			archivePath, archiveErr := r.archiveBranchHistory(ctx, b)
-			if archivePath != "" {
-				result.Archives = append(result.Archives, archivePath)
-				uiAction("ARCHIVED", "Git history → "+archivePath)
-			}
-			if archiveErr != nil {
-				result.addErr("archiving branch", archiveErr)
 				result.BranchesSkipped++
 				continue
 			}
@@ -711,20 +624,6 @@ func uiLocalCommits(ctx context.Context, r repository, base string, b Branch) {
 		}
 	}
 }
-func (r repository) checkWorktree(ctx context.Context, wt Worktree, b Branch, hasBranch bool) error {
-	if err := r.checkWorktreeIdentity(ctx, wt, b, hasBranch); err != nil {
-		return err
-	}
-	status, err := r.status(ctx, wt.Path, false)
-	if err != nil {
-		return err
-	}
-	if status != "" {
-		return errors.New("worktree contains modified or untracked files; keeping it")
-	}
-	return nil
-}
-
 func (r repository) checkWorktreeIdentity(ctx context.Context, wt Worktree, b Branch, hasBranch bool) error {
 	fresh, err := r.worktrees(ctx)
 	if err != nil {
@@ -768,36 +667,6 @@ func (r repository) checkWorktreeIdentity(ctx context.Context, wt Worktree, b Br
 	}
 
 	return nil
-}
-
-func (r repository) archiveWorktree(ctx context.Context, wt Worktree, b Branch, hasBranch bool) (string, error) {
-	if err := r.checkWorktree(ctx, wt, b, hasBranch); err != nil {
-		return "", err
-	}
-	paths, err := ignoredPaths(ctx, r, wt.Path)
-	if err != nil || len(paths) == 0 {
-		return "", err
-	}
-	state, err := stateDirectory()
-	if err != nil {
-		return "", err
-	}
-	return archiveIgnored(ctx, wt.Path, filepath.Join(state, "archives"), paths)
-}
-
-func (r repository) removeWorktree(ctx context.Context, wt Worktree, b Branch, hasBranch bool) error {
-	if err := r.checkWorktree(ctx, wt, b, hasBranch); err != nil {
-		return err
-	}
-	status, err := r.status(ctx, wt.Path, true)
-	if err != nil {
-		return err
-	}
-	if status != "" {
-		return errors.New("worktree contains modified, untracked, or ignored files; keeping it")
-	}
-	_, err = r.git(ctx, "worktree", "remove", "--", wt.Path)
-	return err
 }
 
 func cleanupKeepReason(pr PR, b Branch) string {

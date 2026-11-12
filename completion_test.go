@@ -8,7 +8,7 @@ import (
 	"testing"
 )
 
-func TestDetachedSquashCompletionArchivesLocalHistory(t *testing.T) {
+func TestDetachedSquashCompletionDeletesWorktree(t *testing.T) {
 	f := newCleanupFixture(t)
 	path := filepath.Join(f.root, "detached")
 	f.run(f.dir, "worktree", "add", "--detach", path)
@@ -31,14 +31,14 @@ func TestDetachedSquashCompletionArchivesLocalHistory(t *testing.T) {
 	t.Setenv("TEST_GRAPH", graphPath)
 	f.write(filepath.Join(f.root, "bin", "gh"), "#!/bin/sh\nif [ \"$1\" = api ]; then cat \"$TEST_GRAPH\"; else cat \"$TEST_PRS\"; fi\n")
 	wt := Worktree{Path: path, OID: tip}
-	_, complete, archive, err := detachedCompletion(t.Context(), f.repo, wt, "main", defaultOptions())
-	if err != nil || !complete || !archive {
-		t.Fatalf("squash completion must preserve history: complete=%v archive=%v err=%v", complete, archive, err)
+	_, complete, err := detachedCompletion(t.Context(), f.repo, wt, "main", defaultOptions())
+	if err != nil || !complete {
+		t.Fatalf("squash completion: complete=%v err=%v", complete, err)
 	}
 	missing := strings.Repeat("f", 40)
 	f.write(f.prs, "["+strings.ReplaceAll(pr, merged, missing)+"]")
 	f.write(graphPath, strings.ReplaceAll(graph, merged, missing))
-	_, complete, _, err = detachedCompletion(t.Context(), f.repo, wt, "main", defaultOptions())
+	_, complete, err = detachedCompletion(t.Context(), f.repo, wt, "main", defaultOptions())
 	if err != nil || complete {
 		t.Fatalf("unfetched merge must remain unverified without failing preview: %v %v", complete, err)
 	}
@@ -47,31 +47,18 @@ func TestDetachedSquashCompletionArchivesLocalHistory(t *testing.T) {
 	f.write(filepath.Join(path, "extra"), "unmerged addition\n")
 	f.run(path, "commit", "-am", "unmerged local change")
 	wt.OID = f.run(path, "rev-parse", "HEAD")
-	_, complete, _, err = detachedCompletion(t.Context(), f.repo, wt, "main", defaultOptions())
+	_, complete, err = detachedCompletion(t.Context(), f.repo, wt, "main", defaultOptions())
 	if err != nil || complete {
 		t.Fatalf("extra local commit accepted as complete: %v, %v", complete, err)
 	}
 	f.run(path, "reset", "--hard", tip)
 	f.write(filepath.Join(path, "ignored"), "local environment\n")
-	kept := cleanFixture(t, f, false)
-	if kept.WorktreesRemoved != 0 || len(kept.Archives) != 0 {
-		t.Fatalf("squash history changed without --archive: %+v", kept)
-	}
-	if got := f.run(path, "rev-parse", "HEAD"); got != tip {
-		t.Fatalf("retained detached history changed: %s", got)
-	}
-	result := cleanFixtureWithArchives(t, f, false)
-	if result.WorktreesRemoved != 1 || len(result.Archives) != 1 {
-		t.Fatalf("squash cleanup did not archive and remove: %+v", result)
+	result := cleanFixture(t, f, false)
+	if result.WorktreesRemoved != 1 {
+		t.Fatalf("squash cleanup: %+v", result)
 	}
 	if _, err := os.Stat(path); !os.IsNotExist(err) {
 		t.Fatalf("worktree remains: %v", err)
-	}
-	archivePath := result.Archives[0]
-	f.run(f.dir, "bundle", "verify", filepath.Join(archivePath, "history.bundle"))
-	data, err := os.ReadFile(filepath.Join(archivePath, "files", "detached", "ignored"))
-	if err != nil || string(data) != "local environment\n" {
-		t.Fatalf("ignored environment missing: %q, %v", data, err)
 	}
 }
 
@@ -80,9 +67,9 @@ func TestDetachedAncestorAndOpenPRProtection(t *testing.T) {
 	path := filepath.Join(f.root, "detached")
 	f.run(f.dir, "worktree", "add", "--detach", path)
 	wt := Worktree{Path: path, OID: f.run(path, "rev-parse", "HEAD")}
-	_, complete, archive, err := detachedCompletion(t.Context(), f.repo, wt, "main", defaultOptions())
-	if err != nil || !complete || archive {
-		t.Fatalf("ancestor completion: %v %v %v", complete, archive, err)
+	_, complete, err := detachedCompletion(t.Context(), f.repo, wt, "main", defaultOptions())
+	if err != nil || !complete {
+		t.Fatalf("ancestor completion: %v %v", complete, err)
 	}
 	f.pullRequests("OPEN", map[string]string{"feature": wt.OID})
 	graph := fmt.Sprintf(`{"data":{"repository":{"object":{"associatedPullRequests":{"nodes":[{"number":1,"headRefName":"feature","headRefOid":"%s","state":"OPEN","headRepository":{"name":"repo","owner":{"login":"audit"}}}],"pageInfo":{"hasNextPage":false}}}}}}`, wt.OID)
@@ -90,7 +77,7 @@ func TestDetachedAncestorAndOpenPRProtection(t *testing.T) {
 	f.write(graphPath, graph)
 	t.Setenv("TEST_GRAPH", graphPath)
 	f.write(filepath.Join(f.root, "bin", "gh"), "#!/bin/sh\nif [ \"$1\" = api ]; then cat \"$TEST_GRAPH\"; else cat \"$TEST_PRS\"; fi\n")
-	pr, complete, _, err := detachedCompletion(t.Context(), f.repo, wt, "main", defaultOptions())
+	pr, complete, err := detachedCompletion(t.Context(), f.repo, wt, "main", defaultOptions())
 	if err != nil || complete || pr.State != "OPEN" {
 		t.Fatalf("open PR failed to protect integrated tip: %+v %v %v", pr, complete, err)
 	}

@@ -23,15 +23,15 @@ func TestParseArgs(t *testing.T) {
 			t.Fatalf("%v: %+v %q %v %v", args, opts, dir, all, err)
 		}
 	}
-	opts, dir, all, err := parseArgs([]string{"--force", "--fix", "--archive", "--timeout=2s", "--agent-timeout", "3m", "--jobs", "2", "--pr-limit=5", "--exclude-pr-filtering", "all", "--", "-repos"})
-	if err != nil || !opts.Force || !opts.Fix || !opts.Archive || dir != "-repos" || !all || opts.Timeout != 2*time.Second || opts.AgentTimeout != 3*time.Minute || opts.Jobs != 2 || opts.PRLimit != 5 || opts.PRAuthor != "" {
+	opts, dir, all, err := parseArgs([]string{"--force", "--fix", "--timeout=2s", "--agent-timeout", "3m", "--jobs", "2", "--pr-limit=5", "--exclude-pr-filtering", "all", "--", "-repos"})
+	if err != nil || !opts.Force || !opts.Fix || dir != "-repos" || !all || opts.Timeout != 2*time.Second || opts.AgentTimeout != 3*time.Minute || opts.Jobs != 2 || opts.PRLimit != 5 || opts.PRAuthor != "" {
 		t.Fatalf("flags: %+v %q %v %v", opts, dir, all, err)
 	}
 	for _, args := range [][]string{
 		{"--auto", "all", "repos", "--dryrun"},
 		{"all", "repos", "extra"},
 		{"--pr-limit"}, {"--pr-limit", "0"}, {"--jobs=-1"}, {"--timeout=0s"}, {"--auto=false"}, {"--stale-days=-1"}, {"--stale-days=30d"},
-		{"--archive=false"}, {"--fix=false"}, {"--agent-timeout"}, {"--agent-timeout=0s"}, {"--agent-timeout=-1s"}, {"--agent-timeout=invalid"},
+		{"--archive"}, {"--archive=false"}, {"--interactive=false"}, {"--fix=false"}, {"--agent-timeout"}, {"--agent-timeout=0s"}, {"--agent-timeout=-1s"}, {"--agent-timeout=invalid"},
 	} {
 		if _, _, _, err := parseArgs(args); err == nil {
 			t.Errorf("accepted invalid arguments %v", args)
@@ -43,8 +43,8 @@ func TestParseArgs(t *testing.T) {
 			t.Fatalf("stale threshold %q: %+v, %v", days, opts, err)
 		}
 	}
-	if defaultOptions().Archive {
-		t.Fatal("archival must be opt-in")
+	if !defaultOptions().Auto {
+		t.Fatal("automatic cleanup must be the default")
 	}
 	if defaultOptions().StaleDays != 7 {
 		t.Fatal("stale cleanup must default to 7 days")
@@ -124,5 +124,22 @@ func TestCancellationStopsAllAndPrompt(t *testing.T) {
 func TestDiscoverMissingPath(t *testing.T) {
 	if _, err := discoverRepo(t.Context(), filepath.Join(t.TempDir(), "missing"), time.Second); err == nil {
 		t.Fatal("missing repository accepted")
+	}
+}
+
+func TestCleanupModeDefaultsAndOverrides(t *testing.T) {
+	for _, tt := range []struct {
+		args []string
+		auto bool
+	}{
+		{nil, true},
+		{[]string{"--interactive"}, false},
+		{[]string{"--auto", "--interactive"}, false},
+		{[]string{"--interactive", "--auto"}, true},
+	} {
+		opts, _, _, err := parseArgs(tt.args)
+		if err != nil || opts.Auto != tt.auto {
+			t.Fatalf("%v: auto=%v, err=%v", tt.args, opts.Auto, err)
+		}
 	}
 }

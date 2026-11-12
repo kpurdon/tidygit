@@ -17,29 +17,29 @@ import (
 var version = "dev"
 
 type options struct {
-	Auto, DryRun, Archive, Rebase, Force, Fix, Help, Version bool
-	PRLimit                                                  int
-	PRAuthor                                                 string
-	Timeout                                                  time.Duration
-	AgentTimeout                                             time.Duration
-	Jobs                                                     int
-	StaleDays                                                int
+	Auto, DryRun, Rebase, Force, Fix, Help, Version bool
+	PRLimit                                         int
+	PRAuthor                                        string
+	Timeout                                         time.Duration
+	AgentTimeout                                    time.Duration
+	Jobs                                            int
+	StaleDays                                       int
 }
 
 func defaultOptions() options {
-	return options{PRLimit: 100, PRAuthor: "@me", Timeout: 30 * time.Second, AgentTimeout: 5 * time.Minute, Jobs: 4, StaleDays: 7}
+	return options{Auto: true, PRLimit: 100, PRAuthor: "@me", Timeout: 30 * time.Second, AgentTimeout: 5 * time.Minute, Jobs: 4, StaleDays: 7}
 }
 
 const usage = `Usage: tidygit [options] [all [dir]]
 
 Tidy the current repository or immediate repositories in a directory.
 
-  --auto                  Remove completed work, including ignored files; never prompt
-  --archive               Allow recovery archives before removing local work
+  --auto                  Clean without prompting (default)
+  --interactive           Prompt before each removal
   --dry-run               Show proposed cleanup without changing repositories
   --force                 Recheck unchanged repositories; keep all deletion safeguards
   --fix                   Use the configured agent to repair operational failures
-  --stale-days N           With --archive, archive inactive work after N days (default 7; 0 disables)
+  --stale-days N           Delete inactive work after N days (default 7; 0 disables)
   --pr-limit N            PR lookup limit (default 100)
   --exclude-pr-filtering  Include all authors in the initial PR lookup
   --rebase                Rebase the default branch instead of fast-forward only
@@ -102,15 +102,15 @@ func parseArgs(args []string) (options, string, bool, error) {
 					opts.PRLimit = n
 				}
 			}
-		case "--auto", "--archive", "--dry-run", "--rebase", "--force", "--fix", "--exclude-pr-filtering", "--version", "--help", "-h":
+		case "--auto", "--interactive", "--dry-run", "--rebase", "--force", "--fix", "--exclude-pr-filtering", "--version", "--help", "-h":
 			if hasValue {
 				return opts, "", false, fmt.Errorf("%s does not accept a value", name)
 			}
 			switch name {
 			case "--auto":
 				opts.Auto = true
-			case "--archive":
-				opts.Archive = true
+			case "--interactive":
+				opts.Auto = false
 			case "--dry-run":
 				opts.DryRun = true
 			case "--force":
@@ -176,7 +176,7 @@ func run(ctx context.Context, args []string) error {
 		return nil
 	}
 	if !opts.Auto && !opts.DryRun && !interactiveTerminal() {
-		return errors.New("interactive cleanup requires a terminal; use --auto or --dry-run")
+		return errors.New("interactive cleanup requires a terminal; omit --interactive or use --dry-run")
 	}
 	if all {
 		return cleanAll(ctx, dir, opts)
