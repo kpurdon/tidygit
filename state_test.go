@@ -169,8 +169,8 @@ func TestLocalFingerprintErrorsAndMetadata(t *testing.T) {
 	if err := os.RemoveAll(linked); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := localFingerprint(t.Context(), f.repo, defaultOptions()); err == nil {
-		t.Fatal("missing worktree accepted")
+	if _, err := localFingerprint(t.Context(), f.repo, defaultOptions()); err != nil {
+		t.Fatalf("retained metadata for missing worktree could not be fingerprinted: %v", err)
 	}
 }
 

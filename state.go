@@ -43,7 +43,7 @@ func localFingerprintAt(ctx context.Context, r repository, opts options, now tim
 }
 
 // Bump when cleanup eligibility or fingerprint semantics change, not for UI builds.
-const cacheSemanticsVersion = 8
+const cacheSemanticsVersion = 9
 
 type stateRef struct{ OID, Symref string }
 type stateConfig struct {
@@ -230,17 +230,25 @@ func snapshotWorktree(ctx context.Context, r repository, wt Worktree, opts optio
 	fingerprintField(h, fmt.Sprintf("%q:%q:%q:%t:%t", wt.Path, wt.Branch, wt.OID, wt.Locked, wt.Prunable))
 	wr := r
 	wr.Dir = wt.Path
-	admin, err := wr.gitDir(ctx)
+	admin, available, err := r.worktreeGitDir(ctx, wt)
 	if err != nil {
 		return "", err
 	}
-	// Index entries, not index timestamps/stat-cache extensions, describe staging.
-	index, err := wr.git(ctx, "ls-files", "--stage", "-v", "-z")
-	if err != nil {
-		return "", err
+	fingerprintField(h, fmt.Sprint(available))
+	metadata := []string{"HEAD", "config.worktree", "rebase-merge", "rebase-apply", "MERGE_HEAD", "CHERRY_PICK_HEAD", "REVERT_HEAD", "sequencer", "BISECT_START"}
+	if available {
+		// Index entries, not index timestamps/stat-cache extensions, describe staging.
+		index, err := wr.git(ctx, "ls-files", "--stage", "-v", "-z")
+		if err != nil {
+			return "", err
+		}
+		fingerprintField(h, index)
+	} else {
+		// An unavailable checkout cannot run Git. Retained metadata can still
+		// change operation ownership and must invalidate a successful run marker.
+		metadata = append(metadata, "index", "gitdir", "commondir")
 	}
-	fingerprintField(h, index)
-	for _, name := range []string{"HEAD", "config.worktree", "rebase-merge", "rebase-apply", "MERGE_HEAD", "CHERRY_PICK_HEAD", "REVERT_HEAD", "sequencer", "BISECT_START"} {
+	for _, name := range metadata {
 		path := filepath.Join(admin, name)
 		if _, err := os.Lstat(path); errors.Is(err, fs.ErrNotExist) {
 			fingerprintField(h, name+":absent")
@@ -252,6 +260,9 @@ func snapshotWorktree(ctx context.Context, r repository, wt Worktree, opts optio
 		if err := fingerprintTree(ctx, h, path, true); err != nil {
 			return "", err
 		}
+	}
+	if !available {
+		return fmt.Sprintf("%x", h.Sum(nil)), nil
 	}
 	latest, err := fingerprintWorktree(ctx, h, wt.Path)
 	if err != nil {
